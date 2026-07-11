@@ -1,44 +1,39 @@
-    using System;
+
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Oxide.Core;
-using Oxide.Core.Plugins;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.0.0")]
-    [Description("Essential admin tools for Rust servers: maintenance, teleport, god, fly, noclip, vanish, speed, heal, eat, clear, give, repair, repairall, kick, list, ping, time, day/night, rules, help.")]
+    [Info("CWEssentials", "whitecristafer", "1.1.0")]
+    [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        #region Constants
-
-        private const string PluginVersion = "1.0.0";
-        private const string AdminPermission = "cwessentials.admin";
-        private const string TargetOthersPermission = "cwessentials.target.others";
+        private const string PluginVersion = "1.1.0";
+        private const string PermissionAdmin = "cwessentials.admin";
+        private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
-
-        // Default values
-        private const float DefaultMessageSize = 14;
-        private const float DefaultTitleSize = 16;
+        private const string DataFileName = "CWEssentials_Data";
         private const string DefaultChatPrefix = "<size=12><color=#66ccff><b>CWEssentials</b></color></size> |";
         private const ulong DefaultPluginIcon = 76561198209258869UL;
         private const string DefaultMaintenanceMessage = "Server is under maintenance. Please come back later.";
 
-        #endregion
+        private PluginConfig _config;
+        private StoredData _data;
 
         #region Configuration
-
-        private PluginConfig _config;
 
         private class PluginConfig
         {
             [JsonProperty("ConfigVersion")]
-            public int Version = 1;
+            public int Version = 2;
 
             [JsonProperty("Settings")]
             public SettingsConfig Settings = new SettingsConfig();
@@ -52,6 +47,9 @@ namespace Oxide.Plugins
 
         private class SettingsConfig
         {
+            [JsonProperty("Enabled")]
+            public bool Enabled = true;
+
             [JsonProperty("ChatPrefix")]
             public string ChatPrefix = DefaultChatPrefix;
 
@@ -59,10 +57,10 @@ namespace Oxide.Plugins
             public ulong PluginIcon = DefaultPluginIcon;
 
             [JsonProperty("MessageSize")]
-            public int MessageSize = (int)DefaultMessageSize;
+            public int MessageSize = 14;
 
             [JsonProperty("TitleSize")]
-            public int TitleSize = (int)DefaultTitleSize;
+            public int TitleSize = 16;
 
             [JsonProperty("Colors")]
             public ColorsConfig Colors = new ColorsConfig();
@@ -143,17 +141,20 @@ namespace Oxide.Plugins
         protected override void LoadConfig()
         {
             base.LoadConfig();
+
             try
             {
                 _config = Config.ReadObject<PluginConfig>();
                 if (_config == null) _config = new PluginConfig();
                 NormalizeConfig();
+                EnsureRulesFolderExists();
                 SaveConfig();
             }
             catch (Exception ex)
             {
-                PrintWarning($"Configuration load error: {ex.Message}. Creating default config.");
+                PrintWarning($"Configuration load error: {ex.Message}. A new default configuration will be created.");
                 _config = new PluginConfig();
+                EnsureRulesFolderExists();
                 SaveConfig();
             }
         }
@@ -164,61 +165,58 @@ namespace Oxide.Plugins
         {
             bool migrated = false;
 
-            if (_config.Version != 1)
+            if (_config.Version != 2)
             {
-                _config.Version = 1;
+                _config.Version = 2;
                 migrated = true;
             }
 
-            // Ensure all sections exist
-            if (_config.Settings == null) { _config.Settings = new SettingsConfig(); migrated = true; }
-            if (_config.Commands == null) { _config.Commands = new CommandsConfig(); migrated = true; }
-            if (_config.Maintenance == null) { _config.Maintenance = new MaintenanceConfig(); migrated = true; }
-            if (_config.Settings.Colors == null) { _config.Settings.Colors = new ColorsConfig(); migrated = true; }
+            if (_config.Settings == null) _config.Settings = new SettingsConfig();
+            if (_config.Settings.Colors == null) _config.Settings.Colors = new ColorsConfig();
+            if (_config.Commands == null) _config.Commands = new CommandsConfig();
+            if (_config.Maintenance == null) _config.Maintenance = new MaintenanceConfig();
+            if (_config.Maintenance.Whitelist == null) _config.Maintenance.Whitelist = new List<string>();
 
-            // Validate fields
             if (string.IsNullOrWhiteSpace(_config.Settings.ChatPrefix))
                 _config.Settings.ChatPrefix = DefaultChatPrefix;
+
             if (_config.Settings.PluginIcon == 0)
                 _config.Settings.PluginIcon = DefaultPluginIcon;
+
             _config.Settings.MessageSize = Mathf.Clamp(_config.Settings.MessageSize, 10, 24);
             _config.Settings.TitleSize = Mathf.Clamp(_config.Settings.TitleSize, 10, 24);
+
             if (string.IsNullOrWhiteSpace(_config.Settings.MaintenanceMessage))
                 _config.Settings.MaintenanceMessage = DefaultMaintenanceMessage;
+
             if (string.IsNullOrWhiteSpace(_config.Settings.RulesFile))
                 _config.Settings.RulesFile = "rules.txt";
 
-            // Normalize hex colors
             _config.Settings.Colors.Info = NormalizeHex(_config.Settings.Colors.Info, "#aaddff");
             _config.Settings.Colors.Success = NormalizeHex(_config.Settings.Colors.Success, "#66ff66");
             _config.Settings.Colors.Warning = NormalizeHex(_config.Settings.Colors.Warning, "#ffaa00");
             _config.Settings.Colors.Error = NormalizeHex(_config.Settings.Colors.Error, "#ff6666");
             _config.Settings.Colors.Highlight = NormalizeHex(_config.Settings.Colors.Highlight, "#ffffff");
 
-            // Ensure whitelist is not null
-            if (_config.Maintenance.Whitelist == null)
-            {
-                _config.Maintenance.Whitelist = new List<string>();
-                migrated = true;
-            }
-
-            if (migrated) PrintWarning("Configuration was migrated to the latest version.");
+            if (migrated)
+                PrintWarning("Configuration was migrated to the latest version.");
         }
 
         private string NormalizeHex(string value, string fallback)
         {
-            if (string.IsNullOrWhiteSpace(value)) return fallback;
+            if (string.IsNullOrWhiteSpace(value))
+                return fallback;
+
             value = value.Trim();
-            if (!value.StartsWith("#")) value = "#" + value;
-            if (!Regex.IsMatch(value, "^#(?:[0-9a-fA-F]{3}){1,2}$")) return fallback;
-            return value;
+            if (!value.StartsWith("#"))
+                value = "#" + value;
+
+            return Regex.IsMatch(value, "^#(?:[0-9a-fA-F]{3}){1,2}$") ? value : fallback;
         }
 
         #endregion
 
         #region Data
-
-        private StoredData _data;
 
         private class StoredData
         {
@@ -227,10 +225,10 @@ namespace Oxide.Plugins
 
         private class PlayerState
         {
-            public bool God = false;
-            public bool Fly = false;
-            public bool Noclip = false;
-            public bool Vanish = false;
+            public bool God;
+            public bool Fly;
+            public bool Noclip;
+            public bool Vanish;
             public float Speed = 1f;
         }
 
@@ -238,28 +236,42 @@ namespace Oxide.Plugins
         {
             try
             {
-                _data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>("CWEssentials_Data");
+                _data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(DataFileName);
             }
             catch
             {
                 _data = null;
             }
-            if (_data == null)
-            {
-                _data = new StoredData();
-                SaveData();
-            }
+
+            if (_data == null) _data = new StoredData();
             if (_data.PlayerStates == null) _data.PlayerStates = new Dictionary<ulong, PlayerState>();
         }
 
         private void SaveData()
         {
-            Interface.Oxide.DataFileSystem.WriteObject("CWEssentials_Data", _data);
+            if (_data == null)
+                _data = new StoredData();
+
+            Interface.Oxide.DataFileSystem.WriteObject(DataFileName, _data);
+        }
+
+        private PlayerState GetState(BasePlayer player)
+        {
+            if (player == null)
+                return null;
+
+            if (!_data.PlayerStates.TryGetValue(player.userID, out var state))
+            {
+                state = new PlayerState();
+                _data.PlayerStates[player.userID] = state;
+            }
+
+            return state;
         }
 
         #endregion
 
-        #region Localization (English only)
+        #region Localization
 
         protected override void LoadDefaultMessages()
         {
@@ -267,23 +279,27 @@ namespace Oxide.Plugins
             {
                 ["NoPermission"] = "You don't have permission to use this command.",
                 ["NoTargetPermission"] = "You don't have permission to target other players.",
-                ["CommandDisabled"] = "This command is disabled in configuration.",
+                ["CommandDisabled"] = "This command is disabled in the configuration.",
+                ["PluginDisabled"] = "The plugin is currently disabled.",
                 ["PlayerNotFound"] = "Player not found.",
                 ["InvalidSyntax"] = "Invalid syntax. Use: {0}",
                 ["InvalidNumber"] = "Invalid number.",
                 ["InvalidCoordinates"] = "Invalid coordinates. Use: /tploc <x> <y> <z>",
                 ["InvalidSpeed"] = "Speed must be between 1 and 10.",
+                ["TimeSystemUnavailable"] = "Time system is unavailable on this map.",
+                ["NoRulesDefined"] = "No rules defined.",
+                ["RulesReadFailed"] = "Failed to read the rules file.",
                 ["MaintenanceOn"] = "Maintenance mode enabled. All non-whitelisted players have been kicked.",
                 ["MaintenanceOff"] = "Maintenance mode disabled.",
                 ["MaintenanceAlreadyOn"] = "Maintenance mode is already enabled.",
                 ["MaintenanceAlreadyOff"] = "Maintenance mode is already disabled.",
-                ["MaintenanceAdded"] = "Player {0} added to whitelist.",
-                ["MaintenanceRemoved"] = "Player {0} removed from whitelist.",
+                ["MaintenanceAdded"] = "Player {0} added to the whitelist.",
+                ["MaintenanceRemoved"] = "Player {0} removed from the whitelist.",
                 ["MaintenanceNotInWhitelist"] = "Player {0} is not in the whitelist.",
                 ["MaintenanceAlreadyInWhitelist"] = "Player {0} is already in the whitelist.",
-                ["MaintenanceListHeader"] = "Maintenance Whitelist ({0} entries):",
+                ["MaintenanceListHeader"] = "Maintenance whitelist ({0} entries):",
                 ["MaintenanceListEntry"] = "- {0}",
-                ["MaintenanceListEmpty"] = "Whitelist is empty.",
+                ["MaintenanceListEmpty"] = "The whitelist is empty.",
                 ["MaintenanceStatus"] = "Maintenance mode is {0}.",
                 ["MaintenanceStatusOn"] = "ON",
                 ["MaintenanceStatusOff"] = "OFF",
@@ -319,6 +335,7 @@ namespace Oxide.Plugins
                 ["GiveSelf"] = "You received {0} x {1}.",
                 ["GiveOther"] = "Gave {0} x {1} to {2}.",
                 ["GiveNotFound"] = "Item '{0}' not found.",
+                ["GiveDropped"] = "Inventory is full. The item was dropped on the ground near {0}.",
                 ["RepairDone"] = "Item repaired.",
                 ["RepairOther"] = "Repaired item of {0}.",
                 ["RepairAllDone"] = "All items repaired.",
@@ -327,19 +344,20 @@ namespace Oxide.Plugins
                 ["KickSelf"] = "You cannot kick yourself.",
                 ["ListHeader"] = "Players online ({0}):",
                 ["ListEntry"] = "{0} [SteamID: {1}]",
-                ["PingResult"] = "Your ping: {0}ms.",
+                ["PingResult"] = "Your ping: {0} ms.",
+                ["PingOtherResult"] = "{0}'s ping: {1} ms.",
                 ["TimeResult"] = "Current time: {0}.",
                 ["DaySet"] = "Time set to day.",
                 ["NightSet"] = "Time set to night.",
-                ["RulesHeader"] = "Server Rules:",
-                ["RulesLine"] = "  {0}",
+                ["RulesHeader"] = "Server rules:",
+                ["RulesLine"] = "{0}",
                 ["RulesNotFound"] = "Rules file not found.",
-                ["HelpHeader"] = "<size=16><color=#66ccff><b>CWEssentials Help</b></color></size>",
+                ["HelpHeader"] = "CWEssentials Help",
                 ["HelpPage"] = "Page {0}/{1}",
                 ["HelpLine"] = "/{0} - {1}",
-                ["HelpNoCommands"] = "No commands available.",
+                ["HelpNoCommands"] = "No commands are available.",
                 ["ReloadSuccess"] = "CWEssentials reloaded successfully.",
-                ["ReloadFailed"] = "Reload failed. Check server logs.",
+                ["ReloadFailed"] = "Reload failed. Check the server logs.",
                 ["VersionMessage"] = "CWEssentials v{0} by whitecristafer.",
                 ["UnknownCommand"] = "Unknown command. Use /cwe help."
             }, this, "en");
@@ -351,38 +369,284 @@ namespace Oxide.Plugins
 
         private void RegisterPermissions()
         {
-            permission.RegisterPermission(AdminPermission, this);
-            permission.RegisterPermission(TargetOthersPermission, this);
-            // Register command-specific permissions dynamically
-            string[] perms = {
-                "maintenance", "god", "fly", "noclip", "vanish", "speed",
-                "tp", "tphere", "tploc", "heal", "eat", "clear", "give",
-                "repair", "repairall", "kick", "list", "ping", "time", "time.set",
-                "rules", "help", "reload", "version"
+            permission.RegisterPermission(PermissionAdmin, this);
+            permission.RegisterPermission(PermissionTargetOthers, this);
+
+            string[] perms =
+            {
+                "maintenance", "maintenance.bypass", "god", "fly", "noclip", "vanish", "speed",
+                "tp", "tphere", "tploc", "heal", "eat", "clear", "give", "repair", "repairall",
+                "kick", "list", "ping", "time", "time.set", "rules", "help", "reload", "version"
             };
-            foreach (var p in perms)
-                permission.RegisterPermission(PermissionBase + p, this);
-            // Bypass permission for maintenance
-            permission.RegisterPermission("cwessentials.maintenance.bypass", this);
+
+            foreach (string perm in perms)
+                permission.RegisterPermission(PermissionBase + perm, this);
         }
 
-        private bool HasPermission(BasePlayer player, string perm)
+        private bool HasPermission(BasePlayer player, string permissionName)
         {
-            if (player == null) return false;
-            if (player.IsAdmin) return true;
-            return permission.UserHasPermission(player.UserIDString, perm);
+            if (player == null)
+                return true;
+
+            if (player.IsAdmin)
+                return true;
+
+            return permission.UserHasPermission(player.UserIDString, permissionName);
         }
 
-        private bool IsAdmin(BasePlayer player) => HasPermission(player, AdminPermission);
-
-        private bool CanTargetOthers(BasePlayer player) => HasPermission(player, TargetOthersPermission) || IsAdmin(player);
-
-        private bool IsCommandEnabled(string cmdName)
+        private bool IsAdmin(BasePlayer player)
         {
-            var prop = typeof(CommandsConfig).GetProperty(cmdName);
-            if (prop == null) return false;
-            var entry = prop.GetValue(_config.Commands) as CommandEntry;
-            return entry != null && entry.Enabled;
+            return player != null && (player.IsAdmin || permission.UserHasPermission(player.UserIDString, PermissionAdmin));
+        }
+
+        private bool CanTargetOthers(BasePlayer player)
+        {
+            return IsAdmin(player) || HasPermission(player, PermissionTargetOthers);
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private bool IsPluginEnabled()
+        {
+            return _config?.Settings?.Enabled ?? true;
+        }
+
+        private bool IsCommandEnabled(string commandName)
+        {
+            if (_config?.Commands == null)
+                return false;
+
+            PropertyInfo property = typeof(CommandsConfig).GetProperty(commandName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (property == null)
+                return false;
+
+            if (property.GetValue(_config.Commands) is CommandEntry entry)
+                return entry.Enabled;
+
+            return false;
+        }
+
+        private string GetColor(string key)
+        {
+            var colors = _config?.Settings?.Colors ?? new ColorsConfig();
+
+            switch (key)
+            {
+                case "Success":
+                    return colors.Success;
+                case "Warning":
+                    return colors.Warning;
+                case "Error":
+                    return colors.Error;
+                case "Highlight":
+                    return colors.Highlight;
+                default:
+                    return colors.Info;
+            }
+        }
+
+        private string StripRichText(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return string.Empty;
+
+            return Regex.Replace(value, "<[^>]*>", string.Empty);
+        }
+
+        private string FormatChatMessage(string message, string colorKey = "Info", bool useTitleSize = false)
+        {
+            var settings = _config?.Settings ?? new SettingsConfig();
+            string prefix = settings.ChatPrefix ?? DefaultChatPrefix;
+            string color = GetColor(colorKey);
+            int size = useTitleSize ? settings.TitleSize : settings.MessageSize;
+
+            return $"{prefix} <size={size}><color={color}>{message}</color></size>";
+        }
+
+        private void Reply(BasePlayer player, string message, string colorKey = "Info", bool useTitleSize = false)
+        {
+            if (player == null || string.IsNullOrEmpty(message))
+                return;
+
+            player.ChatMessage(FormatChatMessage(message, colorKey, useTitleSize));
+        }
+
+        private void Reply(ConsoleSystem.Arg arg, string message)
+        {
+            if (arg == null || string.IsNullOrEmpty(message))
+                return;
+
+            arg.ReplyWith(StripRichText(message));
+        }
+
+        private void Reply(CommandContext context, string message, string colorKey = "Info", bool useTitleSize = false)
+        {
+            if (context.Player != null)
+            {
+                Reply(context.Player, message, colorKey, useTitleSize);
+                return;
+            }
+
+            if (context.Arg != null)
+            {
+                Reply(context.Arg, FormatChatMessage(message, colorKey, useTitleSize));
+                return;
+            }
+
+            Puts(StripRichText(message));
+        }
+
+        private void LogToConsole(string message)
+        {
+            Puts($"[CWEssentials] {StripRichText(message)}");
+        }
+
+        private BasePlayer FindPlayer(string ident)
+        {
+            if (string.IsNullOrWhiteSpace(ident))
+                return null;
+
+            if (ulong.TryParse(ident, NumberStyles.None, CultureInfo.InvariantCulture, out ulong userId))
+            {
+                BasePlayer byId = BasePlayer.activePlayerList.FirstOrDefault(p => p != null && p.userID == userId);
+                if (byId != null)
+                    return byId;
+
+                byId = BasePlayer.sleepingPlayerList.FirstOrDefault(p => p != null && p.userID == userId);
+                if (byId != null)
+                    return byId;
+            }
+
+            IEnumerable<BasePlayer> allPlayers = BasePlayer.activePlayerList.Concat(BasePlayer.sleepingPlayerList).Where(p => p != null);
+            BasePlayer found = allPlayers.FirstOrDefault(p => p.displayName != null && p.displayName.IndexOf(ident, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (found != null)
+                return found;
+
+            return allPlayers.FirstOrDefault(p => string.Equals(p.UserIDString, ident, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private void TeleportPlayer(BasePlayer player, Vector3 position, Quaternion? rotation = null)
+        {
+            if (player == null || !player.IsConnected)
+                return;
+
+            Effect.server.Run("assets/prefabs/misc/transferable/effects/teleport.prefab", player.transform.position, Vector3.up);
+            player.Teleport(position);
+
+            if (rotation.HasValue)
+                player.eyes.rotation = rotation.Value;
+
+            player.SendNetworkUpdateImmediate();
+            Effect.server.Run("assets/prefabs/misc/transferable/effects/teleport.prefab", position, Vector3.up);
+        }
+
+        private string GetRulesFilePath()
+        {
+            string folder = Path.Combine(Interface.Oxide.ConfigDirectory, Title);
+            return Path.Combine(folder, _config?.Settings?.RulesFile ?? "rules.txt");
+        }
+
+        private void EnsureRulesFolderExists()
+        {
+            string folder = Path.Combine(Interface.Oxide.ConfigDirectory, Title);
+            if (!Directory.Exists(folder))
+                Directory.CreateDirectory(folder);
+        }
+
+        private bool HasMaintenanceBypass(BasePlayer player)
+        {
+            if (player == null)
+                return true;
+
+            if (player.IsAdmin || IsAdmin(player) || permission.UserHasPermission(player.UserIDString, PermissionBase + "maintenance.bypass"))
+                return true;
+
+            return _config?.Maintenance?.Whitelist != null && _config.Maintenance.Whitelist.Contains(player.UserIDString);
+        }
+
+        private void KickPlayersForMaintenance()
+        {
+            if (!IsPluginEnabled() || _config?.Maintenance?.Enabled != true)
+                return;
+
+            foreach (BasePlayer player in BasePlayer.activePlayerList)
+            {
+                if (player == null)
+                    continue;
+
+                if (!HasMaintenanceBypass(player))
+                    player.Kick(_config.Settings.MaintenanceMessage);
+            }
+        }
+
+        private void EnsurePlayerState(BasePlayer player)
+        {
+            if (player == null || _data == null)
+                return;
+
+            GetState(player);
+        }
+
+        private bool TryParseFloat(string value, out float result)
+        {
+            return float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out result);
+        }
+
+        private bool TryParseInt(string value, out int result)
+        {
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out result);
+        }
+
+        private bool TryGetTargetAndValue(CommandContext context, string[] args, out BasePlayer target, out string value, int valueIndex = 0)
+        {
+            target = context.Player;
+            value = null;
+
+            if (args == null || args.Length == 0)
+                return false;
+
+            if (args.Length > valueIndex)
+                value = args[valueIndex];
+
+            if (args.Length > 1)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return false;
+                    }
+
+                    target = possibleTarget;
+                    value = args.Length > valueIndex + 1 ? args[valueIndex + 1] : null;
+                }
+            }
+
+            return true;
+        }
+
+        private string Lang(string key, string playerId = null, params object[] args)
+        {
+            string message = lang.GetMessage(key, this, playerId);
+            return args.Length > 0 ? string.Format(message, args) : message;
+        }
+
+        private void GuardDisabledCommand(CommandContext context, string commandName)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(commandName))
+                throw new InvalidOperationException("DisabledCommand");
+        }
+
+        private bool IsCommandAllowed(CommandContext context, string commandName, string permissionName)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(commandName))
+                return false;
+
+            return context.Player == null || HasPermission(context.Player, permissionName);
         }
 
         #endregion
@@ -398,926 +662,1398 @@ namespace Oxide.Plugins
 
         private void OnServerInitialized()
         {
-            // If maintenance is enabled at startup, apply to all connected
-            if (_config.Maintenance.Enabled)
-                EnforceMaintenanceKick();
+            if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
+                KickPlayersForMaintenance();
 
-            // Start periodic speed/fly/noclip maintenance? We'll handle in hooks.
             PrintBanner();
         }
 
         private void Unload()
         {
-            // Clean up vanish / noclip / fly flags for all players to avoid stuck state
-            foreach (var player in BasePlayer.activePlayerList)
+            try
             {
-                if (player == null) continue;
-                if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
-                    player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, false);
-                if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
-                    player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, false);
-                if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
-                    player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, false);
-                if (player.HasPlayerFlag(BasePlayer.PlayerFlags.SafeZone))
-                    player.SetPlayerFlag(BasePlayer.PlayerFlags.SafeZone, false); // хотя мы не используем safe zone
-                // Сбрасываем скорость
-                player.walkSpeed = 1f;
-                player.runSpeed = 1f;
-                player.SendNetworkUpdateImmediate();
+                foreach (BasePlayer player in BasePlayer.activePlayerList)
+                {
+                    if (player == null)
+                        continue;
+
+                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, false);
+
+                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, false);
+
+                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, false);
+
+                    player.walkSpeed = 1f;
+                    player.runSpeed = 1f;
+                    player.SendNetworkUpdateImmediate();
+                }
             }
+            catch (Exception ex)
+            {
+                PrintWarning($"Unload cleanup warning: {ex.Message}");
+            }
+
             SaveData();
         }
 
         private void PrintBanner()
         {
-            Puts($"===============================================");
+            Puts("===============================================");
             Puts($"CWEssentials v{PluginVersion} loaded.");
-            Puts($"Maintenance: {(_config.Maintenance.Enabled ? "ON" : "OFF")}");
-            Puts($"Whitelist count: {_config.Maintenance.Whitelist.Count}");
-            Puts($"===============================================");
+            Puts($"Plugin enabled: {(_config?.Settings?.Enabled == true ? "ON" : "OFF")}");
+            Puts($"Maintenance: {(_config?.Maintenance?.Enabled == true ? "ON" : "OFF")}");
+            Puts($"Whitelist count: {_config?.Maintenance?.Whitelist?.Count ?? 0}");
+            Puts("===============================================");
         }
 
         #endregion
 
-        #region Helpers
+        #region Command Context
 
-        private BasePlayer FindPlayer(string ident)
+        private struct CommandContext
         {
-            if (string.IsNullOrEmpty(ident)) return null;
-            if (ulong.TryParse(ident, out ulong id))
-                return BasePlayer.FindByID(id);
-            // Search by name (partial match)
-            var players = BasePlayer.activePlayerList;
-            var found = players.FirstOrDefault(p => p.displayName.IndexOf(ident, StringComparison.OrdinalIgnoreCase) >= 0);
-            if (found != null) return found;
-            // Try exact UserIDString
-            return players.FirstOrDefault(p => p.UserIDString == ident);
-        }
-
-        private string Lang(string key, string playerId = null, params object[] args)
-        {
-            string msg = lang.GetMessage(key, this, playerId);
-            if (args.Length > 0) msg = string.Format(msg, args);
-            return msg;
-        }
-
-        private void SendMessage(BasePlayer player, string message, string colorKey = "Info")
-        {
-            if (player == null || string.IsNullOrEmpty(message)) return;
-            var settings = _config.Settings;
-            string prefix = settings.ChatPrefix;
-            int size = settings.MessageSize;
-            string color = settings.Colors[colorKey] ?? "#ffffff";
-            string formatted = $"{prefix} <size={size}><color={color}>{message}</color></size>";
-            player.SendConsoleCommand("chat.add", new object[] { settings.PluginIcon, formatted });
-        }
-
-        private void SendInfo(BasePlayer player, string msg) => SendMessage(player, msg, "Info");
-        private void SendSuccess(BasePlayer player, string msg) => SendMessage(player, msg, "Success");
-        private void SendWarning(BasePlayer player, string msg) => SendMessage(player, msg, "Warning");
-        private void SendError(BasePlayer player, string msg) => SendMessage(player, msg, "Error");
-
-        private void LogToConsole(string message)
-        {
-            // Strip rich tags for console
-            string plain = Regex.Replace(message, "<[^>]*>", "");
-            Puts($"[CWEssentials] {plain}");
-        }
-
-        private void TeleportPlayer(BasePlayer player, Vector3 pos, Quaternion rot = default)
-        {
-            if (player == null || !player.IsConnected) return;
-            Effect.server.Run("assets/prefabs/misc/transferable/effects/teleport.prefab", player.transform.position, Vector3.up);
-            player.Teleport(pos);
-            if (rot != default)
-                player.eyes.rotation = rot;
-            player.SendNetworkUpdateImmediate();
-            Effect.server.Run("assets/prefabs/misc/transferable/effects/teleport.prefab", pos, Vector3.up);
-        }
-
-        private void EnforceMaintenanceKick()
-        {
-            if (!_config.Maintenance.Enabled) return;
-            foreach (var player in BasePlayer.activePlayerList)
+            public CommandContext(CWEssentials plugin, BasePlayer player, ConsoleSystem.Arg arg = null)
             {
-                if (!HasPermission(player, "cwessentials.maintenance.bypass"))
-                    player.Kick(_config.Settings.MaintenanceMessage);
+                Plugin = plugin;
+                Player = player;
+                Arg = arg;
             }
-        }
 
-        private PlayerState GetState(BasePlayer player)
-        {
-            if (player == null) return null;
-            if (!_data.PlayerStates.TryGetValue(player.userID, out var state))
-            {
-                state = new PlayerState();
-                _data.PlayerStates[player.userID] = state;
-            }
-            return state;
-        }
+            public CWEssentials Plugin { get; }
+            public BasePlayer Player { get; }
+            public ConsoleSystem.Arg Arg { get; }
 
-        private void SaveState(BasePlayer player) => SaveData();
+            public string UserId => Player?.UserIDString ?? "0";
+            public string Name => Player?.displayName ?? "Console";
+        }
 
         #endregion
 
-        #region Chat Commands
+        #region Commands
 
         [ChatCommand("maintenance")]
-        private void CmdMaintenance(BasePlayer player, string cmd, string[] args)
+        private void CmdMaintenance(BasePlayer player, string cmd, string[] args) => HandleMaintenance(new CommandContext(this, player), args);
+
+        [ConsoleCommand("maintenance")]
+        private void CCmdMaintenance(ConsoleSystem.Arg arg) => HandleMaintenance(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        private void HandleMaintenance(CommandContext context, string[] args)
         {
-            if (!IsCommandEnabled("Maintenance")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "maintenance")) { SendError(player, Lang("NoPermission")); return; }
+            if (!IsPluginEnabled() || !IsCommandEnabled("Maintenance"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "maintenance"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
 
             if (args.Length == 0)
             {
-                // Toggle
                 bool newState = !_config.Maintenance.Enabled;
-                _config.Maintenance.Enabled = newState;
-                SaveConfig();
+
                 if (newState)
                 {
-                    EnforceMaintenanceKick();
-                    SendSuccess(player, Lang("MaintenanceOn"));
+                    _config.Maintenance.Enabled = true;
+                    SaveConfig();
+                    KickPlayersForMaintenance();
+                    Reply(context, Lang("MaintenanceOn", context.UserId), "Success");
+                    LogToConsole($"Maintenance mode enabled by {context.Name}");
                 }
                 else
                 {
-                    SendSuccess(player, Lang("MaintenanceOff"));
+                    _config.Maintenance.Enabled = false;
+                    SaveConfig();
+                    Reply(context, Lang("MaintenanceOff", context.UserId), "Success");
+                    LogToConsole($"Maintenance mode disabled by {context.Name}");
                 }
-                LogToConsole($"Maintenance toggled {(newState ? "ON" : "OFF")} by {player.displayName}");
+
                 return;
             }
 
             switch (args[0].ToLowerInvariant())
             {
                 case "add":
-                    if (args.Length < 2) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/maintenance add <name|id>")); return; }
-                    var targetAdd = FindPlayer(args[1]);
-                    if (targetAdd == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                    string idAdd = targetAdd.UserIDString;
-                    if (_config.Maintenance.Whitelist.Contains(idAdd))
-                        SendWarning(player, Lang("MaintenanceAlreadyInWhitelist", player.UserIDString, targetAdd.displayName));
-                    else
+                {
+                    if (args.Length < 2)
                     {
-                        _config.Maintenance.Whitelist.Add(idAdd);
-                        SaveConfig();
-                        SendSuccess(player, Lang("MaintenanceAdded", player.UserIDString, targetAdd.displayName));
-                        LogToConsole($"Added {targetAdd.displayName} ({idAdd}) to maintenance whitelist by {player.displayName}");
+                        Reply(context, Lang("InvalidSyntax", context.UserId, "/maintenance add <name|id>"), "Error");
+                        return;
                     }
-                    break;
+
+                    BasePlayer target = FindPlayer(args[1]);
+                    string id = target != null ? target.UserIDString : null;
+                    string label = target != null ? target.displayName : args[1];
+
+                    if (id == null)
+                    {
+                        if (!ulong.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out ulong parsedId))
+                        {
+                            Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                            return;
+                        }
+
+                        id = parsedId.ToString(CultureInfo.InvariantCulture);
+                    }
+
+                    if (_config.Maintenance.Whitelist.Contains(id))
+                    {
+                        Reply(context, Lang("MaintenanceAlreadyInWhitelist", context.UserId, label), "Warning");
+                        return;
+                    }
+
+                    _config.Maintenance.Whitelist.Add(id);
+                    SaveConfig();
+                    Reply(context, Lang("MaintenanceAdded", context.UserId, label), "Success");
+                    LogToConsole($"Added {label} ({id}) to the maintenance whitelist by {context.Name}");
+                    return;
+                }
 
                 case "remove":
-                    if (args.Length < 2) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/maintenance remove <name|id>")); return; }
-                    var targetRem = FindPlayer(args[1]);
-                    if (targetRem == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                    string idRem = targetRem.UserIDString;
-                    if (!_config.Maintenance.Whitelist.Contains(idRem))
-                        SendWarning(player, Lang("MaintenanceNotInWhitelist", player.UserIDString, targetRem.displayName));
-                    else
+                {
+                    if (args.Length < 2)
                     {
-                        _config.Maintenance.Whitelist.Remove(idRem);
-                        SaveConfig();
-                        SendSuccess(player, Lang("MaintenanceRemoved", player.UserIDString, targetRem.displayName));
-                        LogToConsole($"Removed {targetRem.displayName} ({idRem}) from maintenance whitelist by {player.displayName}");
+                        Reply(context, Lang("InvalidSyntax", context.UserId, "/maintenance remove <name|id>"), "Error");
+                        return;
                     }
-                    break;
+
+                    BasePlayer target = FindPlayer(args[1]);
+                    string id = target != null ? target.UserIDString : null;
+                    string label = target != null ? target.displayName : args[1];
+
+                    if (id == null)
+                    {
+                        if (!ulong.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out ulong parsedId))
+                        {
+                            Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                            return;
+                        }
+
+                        id = parsedId.ToString(CultureInfo.InvariantCulture);
+                    }
+
+                    if (!_config.Maintenance.Whitelist.Contains(id))
+                    {
+                        Reply(context, Lang("MaintenanceNotInWhitelist", context.UserId, label), "Warning");
+                        return;
+                    }
+
+                    _config.Maintenance.Whitelist.Remove(id);
+                    SaveConfig();
+                    Reply(context, Lang("MaintenanceRemoved", context.UserId, label), "Success");
+                    LogToConsole($"Removed {label} ({id}) from the maintenance whitelist by {context.Name}");
+                    return;
+                }
 
                 case "list":
-                    var list = _config.Maintenance.Whitelist;
+                {
+                    List<string> list = _config.Maintenance.Whitelist ?? new List<string>();
                     if (list.Count == 0)
                     {
-                        SendInfo(player, Lang("MaintenanceListEmpty"));
+                        Reply(context, Lang("MaintenanceListEmpty", context.UserId), "Info");
+                        return;
                     }
-                    else
-                    {
-                        SendInfo(player, Lang("MaintenanceListHeader", player.UserIDString, list.Count));
-                        foreach (var entry in list)
-                            SendInfo(player, Lang("MaintenanceListEntry", player.UserIDString, entry));
-                    }
-                    break;
+
+                    Reply(context, Lang("MaintenanceListHeader", context.UserId, list.Count), "Highlight", true);
+                    foreach (string entry in list)
+                        Reply(context, Lang("MaintenanceListEntry", context.UserId, entry), "Info");
+                    return;
+                }
 
                 case "status":
-                    string status = _config.Maintenance.Enabled ? Lang("MaintenanceStatusOn") : Lang("MaintenanceStatusOff");
-                    SendInfo(player, Lang("MaintenanceStatus", player.UserIDString, status));
-                    break;
+                {
+                    string status = _config.Maintenance.Enabled ? Lang("MaintenanceStatusOn", context.UserId) : Lang("MaintenanceStatusOff", context.UserId);
+                    Reply(context, Lang("MaintenanceStatus", context.UserId, status), "Info");
+                    return;
+                }
 
                 default:
-                    SendError(player, Lang("UnknownCommand"));
-                    break;
+                    Reply(context, Lang("UnknownCommand", context.UserId), "Error");
+                    return;
             }
         }
 
         [ChatCommand("god")]
-        private void CmdGod(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("God")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "god")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdGod(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "God", "god", state => { state.God = !state.God; }, state => state.God, "GodOn", "GodOff", "GodOnOther", "GodOffOther");
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            var state = GetState(target);
-            state.God = !state.God;
-            SaveData();
-            if (target == player)
-                SendSuccess(player, state.God ? Lang("GodOn") : Lang("GodOff"));
-            else
-                SendSuccess(player, state.God ? Lang("GodOnOther", player.UserIDString, target.displayName) : Lang("GodOffOther", player.UserIDString, target.displayName));
-            LogToConsole($"God {(state.God ? "ON" : "OFF")} for {target.displayName} by {player.displayName}");
-        }
+        [ConsoleCommand("god")]
+        private void CCmdGod(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "God", "god", state => { state.God = !state.God; }, state => state.God, "GodOn", "GodOff", "GodOnOther", "GodOffOther");
 
         [ChatCommand("fly")]
-        private void CmdFly(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Fly")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "fly")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdFly(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Fly", "fly", state => { state.Fly = !state.Fly; }, state => state.Fly, "FlyOn", "FlyOff", "FlyOnOther", "FlyOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state));
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            var state = GetState(target);
-            state.Fly = !state.Fly;
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state.Fly);
-            target.SendNetworkUpdateImmediate();
-            SaveData();
-            if (target == player)
-                SendSuccess(player, state.Fly ? Lang("FlyOn") : Lang("FlyOff"));
-            else
-                SendSuccess(player, state.Fly ? Lang("FlyOnOther", player.UserIDString, target.displayName) : Lang("FlyOffOther", player.UserIDString, target.displayName));
-            LogToConsole($"Fly {(state.Fly ? "ON" : "OFF")} for {target.displayName} by {player.displayName}");
-        }
+        [ConsoleCommand("fly")]
+        private void CCmdFly(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Fly", "fly", state => { state.Fly = !state.Fly; }, state => state.Fly, "FlyOn", "FlyOff", "FlyOnOther", "FlyOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state));
 
         [ChatCommand("noclip")]
-        private void CmdNoclip(BasePlayer player, string cmd, string[] args)
+        private void CmdNoclip(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Noclip", "noclip", state =>
         {
-            if (!IsCommandEnabled("Noclip")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "noclip")) { SendError(player, Lang("NoPermission")); return; }
-
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            var state = GetState(target);
             state.Noclip = !state.Noclip;
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, state.Noclip);
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state.Noclip); // noclip implies fly
-            target.SendNetworkUpdateImmediate();
-            SaveData();
-            if (target == player)
-                SendSuccess(player, state.Noclip ? Lang("NoclipOn") : Lang("NoclipOff"));
-            else
-                SendSuccess(player, state.Noclip ? Lang("NoclipOnOther", player.UserIDString, target.displayName) : Lang("NoclipOffOther", player.UserIDString, target.displayName));
-            LogToConsole($"Noclip {(state.Noclip ? "ON" : "OFF")} for {target.displayName} by {player.displayName}");
-        }
+            state.Fly = state.Noclip || state.Fly;
+        }, state => state.Noclip, "NoclipOn", "NoclipOff", "NoclipOnOther", "NoclipOffOther", applyFlags: (target, state) =>
+        {
+            target.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, state);
+            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state);
+        });
+
+        [ConsoleCommand("noclip")]
+        private void CCmdNoclip(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Noclip", "noclip", state =>
+        {
+            state.Noclip = !state.Noclip;
+            state.Fly = state.Noclip || state.Fly;
+        }, state => state.Noclip, "NoclipOn", "NoclipOff", "NoclipOnOther", "NoclipOffOther", applyFlags: (target, state) =>
+        {
+            target.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, state);
+            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state);
+        });
 
         [ChatCommand("vanish")]
-        private void CmdVanish(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Vanish")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "vanish")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdVanish(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, state));
 
-            BasePlayer target = player;
-            if (args.Length > 0)
+        [ConsoleCommand("vanish")]
+        private void CCmdVanish(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, state));
+
+        private delegate void StateMutation(PlayerState state);
+        private delegate bool StateGetter(PlayerState state);
+        private delegate void StateFlagApplier(BasePlayer target, bool enabled);
+
+        private void HandleToggleState(CommandContext context, string[] args, string configName, string permissionSuffix, StateMutation mutate, StateGetter getter, string selfOnKey, string selfOffKey, string otherOnKey, string otherOffKey, StateFlagApplier applyFlags = null)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(configName))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + permissionSuffix))
             {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
             }
 
-            var state = GetState(target);
-            state.Vanish = !state.Vanish;
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, state.Vanish);
-            target.SendNetworkUpdateImmediate();
+            if (args == null) args = Array.Empty<string>();
+
+            BasePlayer target = context.Player;
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            PlayerState state = GetState(target);
+            mutate(state);
+
+            bool enabled = getter(state);
+            if (applyFlags != null)
+                applyFlags(target, enabled);
+
+            if (configName == "Vanish")
+                target.SendNetworkUpdateImmediate();
+
+            if (configName == "Fly" || configName == "Noclip" || configName == "Vanish")
+                target.SendNetworkUpdateImmediate();
+
             SaveData();
-            if (target == player)
-                SendSuccess(player, state.Vanish ? Lang("VanishOn") : Lang("VanishOff"));
+
+            if (target == context.Player)
+                Reply(context, Lang(enabled ? selfOnKey : selfOffKey, context.UserId), enabled ? "Success" : "Info");
             else
-                SendSuccess(player, state.Vanish ? Lang("VanishOnOther", player.UserIDString, target.displayName) : Lang("VanishOffOther", player.UserIDString, target.displayName));
-            LogToConsole($"Vanish {(state.Vanish ? "ON" : "OFF")} for {target.displayName} by {player.displayName}");
+                Reply(context, Lang(enabled ? otherOnKey : otherOffKey, context.UserId, target.displayName), enabled ? "Success" : "Info");
+
+            LogToConsole($"{configName} {(enabled ? "ON" : "OFF")} for {target.displayName} by {context.Name}");
         }
 
         [ChatCommand("speed")]
-        private void CmdSpeed(BasePlayer player, string cmd, string[] args)
+        private void CmdSpeed(BasePlayer player, string cmd, string[] args) => HandleSpeed(new CommandContext(this, player), args);
+
+        [ConsoleCommand("speed")]
+        private void CCmdSpeed(ConsoleSystem.Arg arg) => HandleSpeed(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        private void HandleSpeed(CommandContext context, string[] args)
         {
-            if (!IsCommandEnabled("Speed")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "speed")) { SendError(player, Lang("NoPermission")); return; }
+            if (!IsPluginEnabled() || !IsCommandEnabled("Speed"))
+                return;
 
-            if (args.Length == 0) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/speed <1-10> or /speed <target> <1-10>")); return; }
-
-            BasePlayer target = player;
-            int speedArgIndex = 0;
-            float speed = 1f;
-            bool reset = false;
-
-            // Check if first arg is a player name
-            BasePlayer possibleTarget = FindPlayer(args[0]);
-            if (possibleTarget != null && possibleTarget != player)
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "speed"))
             {
-                target = possibleTarget;
-                if (!CanTargetOthers(player)) { SendError(player, Lang("NoTargetPermission")); return; }
-                speedArgIndex = 1;
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
             }
 
-            if (args.Length > speedArgIndex)
+            if (args == null) args = Array.Empty<string>();
+            if (args.Length == 0)
             {
-                if (args[speedArgIndex].ToLowerInvariant() == "reset")
+                Reply(context, Lang("InvalidSyntax", context.UserId, "/speed <1-10> or /speed <target> <1-10>"), "Error");
+                return;
+            }
+
+            BasePlayer target = context.Player;
+            int valueIndex = 0;
+
+            if (args.Length >= 2)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
                 {
-                    reset = true;
-                    speed = 1f;
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                    valueIndex = 1;
                 }
-                else if (float.TryParse(args[speedArgIndex], NumberStyles.Float, CultureInfo.InvariantCulture, out speed))
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            float speed;
+            bool reset = false;
+
+            if (valueIndex >= args.Length)
+            {
+                reset = true;
+                speed = 1f;
+            }
+            else
+            {
+                reset = string.Equals(args[valueIndex], "reset", StringComparison.OrdinalIgnoreCase);
+
+                if (!reset)
                 {
+                    if (!TryParseFloat(args[valueIndex], out speed))
+                    {
+                        Reply(context, Lang("InvalidNumber", context.UserId), "Error");
+                        return;
+                    }
+
                     speed = Mathf.Clamp(speed, 1f, 10f);
                 }
                 else
                 {
-                    SendError(player, Lang("InvalidNumber"));
-                    return;
+                    speed = 1f;
                 }
             }
-            else
-            {
-                // No speed value provided, toggle? Actually we set default or reset.
-                reset = true;
-                speed = 1f;
-            }
 
-            var state = GetState(target);
+            PlayerState state = GetState(target);
+            state.Speed = speed;
+            target.walkSpeed = speed;
+            target.runSpeed = speed;
+            target.SendNetworkUpdateImmediate();
+            SaveData();
+
             if (reset)
             {
-                state.Speed = 1f;
-                target.walkSpeed = 1f;
-                target.runSpeed = 1f;
-                target.SendNetworkUpdateImmediate();
-                SaveData();
-                if (target == player)
-                    SendSuccess(player, Lang("SpeedReset"));
+                if (target == context.Player)
+                    Reply(context, Lang("SpeedReset", context.UserId), "Success");
                 else
-                    SendSuccess(player, Lang("SpeedResetOther", player.UserIDString, target.displayName));
+                    Reply(context, Lang("SpeedResetOther", context.UserId, target.displayName), "Success");
             }
             else
             {
-                state.Speed = speed;
-                target.walkSpeed = speed;
-                target.runSpeed = speed;
-                target.SendNetworkUpdateImmediate();
-                SaveData();
-                if (target == player)
-                    SendSuccess(player, Lang("SpeedSet", player.UserIDString, speed));
+                if (target == context.Player)
+                    Reply(context, Lang("SpeedSet", context.UserId, speed.ToString(CultureInfo.InvariantCulture)), "Success");
                 else
-                    SendSuccess(player, Lang("SpeedSetOther", player.UserIDString, speed, target.displayName));
+                    Reply(context, Lang("SpeedSetOther", context.UserId, speed.ToString(CultureInfo.InvariantCulture), target.displayName), "Success");
             }
-            LogToConsole($"Speed set to {(reset ? "1 (reset)" : speed.ToString())} for {target.displayName} by {player.displayName}");
+
+            LogToConsole($"Speed {(reset ? "reset" : speed.ToString(CultureInfo.InvariantCulture))} for {target.displayName} by {context.Name}");
         }
 
         [ChatCommand("tp")]
-        private void CmdTp(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("TP")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "tp")) { SendError(player, Lang("NoPermission")); return; }
-            if (args.Length < 1) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/tp <player>")); return; }
+        private void CmdTp(BasePlayer player, string cmd, string[] args) => HandleTp(new CommandContext(this, player), args, false);
 
-            BasePlayer target = FindPlayer(args[0]);
-            if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-            if (target == player) { SendError(player, "You cannot teleport to yourself."); return; }
-
-            TeleportPlayer(player, target.transform.position, target.eyes.rotation);
-            SendSuccess(player, Lang("TeleportToTarget", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} teleported to {target.displayName}");
-        }
+        [ConsoleCommand("tp")]
+        private void CCmdTp(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), arg?.Args, false);
 
         [ChatCommand("tphere")]
-        private void CmdTpHere(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("TPHere")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "tphere")) { SendError(player, Lang("NoPermission")); return; }
-            if (args.Length < 1) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/tphere <player>")); return; }
+        private void CmdTpHere(BasePlayer player, string cmd, string[] args) => HandleTp(new CommandContext(this, player), args, true);
 
-            BasePlayer target = FindPlayer(args[0]);
-            if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-            if (target == player) { SendError(player, "You cannot teleport yourself to yourself."); return; }
-            if (target != player && !CanTargetOthers(player))
-            { SendError(player, Lang("NoTargetPermission")); return; }
-
-            TeleportPlayer(target, player.transform.position, player.eyes.rotation);
-            SendSuccess(player, Lang("TeleportHere", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} teleported {target.displayName} to themselves");
-        }
+        [ConsoleCommand("tphere")]
+        private void CCmdTpHere(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), arg?.Args, true);
 
         [ChatCommand("tploc")]
-        private void CmdTpLoc(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("TPLoc")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "tploc")) { SendError(player, Lang("NoPermission")); return; }
-            if (args.Length < 3) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/tploc <x> <y> <z>")); return; }
+        private void CmdTpLoc(BasePlayer player, string cmd, string[] args) => HandleTpLoc(new CommandContext(this, player), args);
 
-            if (!float.TryParse(args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x) ||
-                !float.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y) ||
-                !float.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+        [ConsoleCommand("tploc")]
+        private void CCmdTpLoc(ConsoleSystem.Arg arg) => HandleTpLoc(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        private void HandleTp(CommandContext context, string[] args, bool here)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(here ? "TPHere" : "TP"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + (here ? "tphere" : "tp")))
             {
-                SendError(player, Lang("InvalidCoordinates"));
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
             }
 
-            Vector3 pos = new Vector3(x, y, z);
-            TeleportPlayer(player, pos);
-            SendSuccess(player, Lang("TeleportToLoc", player.UserIDString, pos.ToString()));
-            LogToConsole($"{player.displayName} teleported to {pos}");
+            if (args == null) args = Array.Empty<string>();
+            if (args.Length < 1)
+            {
+                Reply(context, Lang("InvalidSyntax", context.UserId, here ? "/tphere <player>" : "/tp <player>"), "Error");
+                return;
+            }
+
+            BasePlayer target = FindPlayer(args[0]);
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            if (!here)
+            {
+                if (context.Player == null)
+                {
+                    Reply(context, Lang("InvalidSyntax", context.UserId, "/tp <player>"), "Error");
+                    return;
+                }
+
+                if (target == context.Player)
+                {
+                    Reply(context, "You cannot teleport to yourself.", "Warning");
+                    return;
+                }
+
+                TeleportPlayer(context.Player, target.transform.position, target.eyes?.rotation);
+                Reply(context, Lang("TeleportToTarget", context.UserId, target.displayName), "Success");
+                LogToConsole($"{context.Name} teleported to {target.displayName}");
+                return;
+            }
+
+            if (target == context.Player)
+            {
+                Reply(context, "You cannot teleport yourself to yourself.", "Warning");
+                return;
+            }
+
+            if (context.Player != null && !CanTargetOthers(context.Player) && target != context.Player)
+            {
+                Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (context.Player == null)
+            {
+                Reply(context, Lang("InvalidSyntax", context.UserId, "/tphere <player>"), "Error");
+                return;
+            }
+
+            TeleportPlayer(target, context.Player.transform.position, context.Player.eyes?.rotation);
+            Reply(context, Lang("TeleportHere", context.UserId, target.displayName), "Success");
+            LogToConsole($"{context.Name} teleported {target.displayName} to their location");
+        }
+
+        private void HandleTpLoc(CommandContext context, string[] args)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("TPLoc"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "tploc"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            if (args.Length < 3)
+            {
+                Reply(context, Lang("InvalidSyntax", context.UserId, "/tploc <x> <y> <z>"), "Error");
+                return;
+            }
+
+            if (!TryParseFloat(args[0], out float x) || !TryParseFloat(args[1], out float y) || !TryParseFloat(args[2], out float z))
+            {
+                Reply(context, Lang("InvalidCoordinates", context.UserId), "Error");
+                return;
+            }
+
+            BasePlayer target = context.Player;
+            if (args.Length >= 4)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[3]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            Vector3 position = new Vector3(x, y, z);
+            TeleportPlayer(target, position);
+            if (target == context.Player)
+                Reply(context, Lang("TeleportToLoc", context.UserId, position.ToString()), "Success");
+            else
+                Reply(context, Lang("TeleportToLoc", context.UserId, position.ToString()), "Success");
+
+            LogToConsole($"{context.Name} teleported {target.displayName} to {position}");
         }
 
         [ChatCommand("heal")]
-        private void CmdHeal(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Heal")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "heal")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdHeal(BasePlayer player, string cmd, string[] args) => HandleHealth(new CommandContext(this, player), args, "heal");
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            target.health = target.MaxHealth();
-            target.metabolism.radiation_poison.value = 0f;
-            target.metabolism.poison.value = 0f;
-            target.metabolism.bleeding.value = 0f;
-            target.SendNetworkUpdateImmediate();
-            if (target == player)
-                SendSuccess(player, Lang("HealDone"));
-            else
-                SendSuccess(player, Lang("HealOther", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} healed {target.displayName}");
-        }
+        [ConsoleCommand("heal")]
+        private void CCmdHeal(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), arg?.Args, "heal");
 
         [ChatCommand("eat")]
-        private void CmdEat(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Eat")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "eat")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdEat(BasePlayer player, string cmd, string[] args) => HandleHealth(new CommandContext(this, player), args, "eat");
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            target.metabolism.calories.value = target.metabolism.calories.max;
-            target.metabolism.hydration.value = target.metabolism.hydration.max;
-            target.SendNetworkUpdateImmediate();
-            if (target == player)
-                SendSuccess(player, Lang("EatDone"));
-            else
-                SendSuccess(player, Lang("EatOther", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} fed {target.displayName}");
-        }
+        [ConsoleCommand("eat")]
+        private void CCmdEat(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), arg?.Args, "eat");
 
         [ChatCommand("clear")]
-        private void CmdClear(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Clear")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "clear")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdClear(BasePlayer player, string cmd, string[] args) => HandleClear(new CommandContext(this, player), args);
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            target.inventory.Strip();
-            if (target == player)
-                SendSuccess(player, Lang("ClearDone"));
-            else
-                SendSuccess(player, Lang("ClearOther", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} cleared inventory of {target.displayName}");
-        }
+        [ConsoleCommand("clear")]
+        private void CCmdClear(ConsoleSystem.Arg arg) => HandleClear(new CommandContext(this, arg?.Player(), arg), arg?.Args);
 
         [ChatCommand("give")]
-        private void CmdGive(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Give")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "give")) { SendError(player, Lang("NoPermission")); return; }
-            if (args.Length < 2) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/give <item> <amount> [target]")); return; }
+        private void CmdGive(BasePlayer player, string cmd, string[] args) => HandleGive(new CommandContext(this, player), args);
 
-            string itemName = args[0];
-            if (!int.TryParse(args[1], out int amount) || amount <= 0) { SendError(player, Lang("InvalidNumber")); return; }
-
-            BasePlayer target = player;
-            if (args.Length > 2)
-            {
-                target = FindPlayer(args[2]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            ItemDefinition def = ItemManager.FindItemDefinition(itemName);
-            if (def == null) { SendError(player, Lang("GiveNotFound", player.UserIDString, itemName)); return; }
-
-            Item item = ItemManager.Create(def, amount);
-            if (item == null) { SendError(player, "Failed to create item."); return; }
-            if (!target.inventory.GiveItem(item))
-            {
-                // Если инвентарь полон - выдать в рюкзак или уведомить
-                item.Drop(target.transform.position + Vector3.up * 2f, Vector3.zero);
-                SendWarning(player, $"Inventory full, item dropped on ground for {target.displayName}.");
-            }
-
-            if (target == player)
-                SendSuccess(player, Lang("GiveSelf", player.UserIDString, amount, def.displayName.english));
-            else
-                SendSuccess(player, Lang("GiveOther", player.UserIDString, amount, def.displayName.english, target.displayName));
-            LogToConsole($"{player.displayName} gave {amount} x {def.shortname} to {target.displayName}");
-        }
+        [ConsoleCommand("give")]
+        private void CCmdGive(ConsoleSystem.Arg arg) => HandleGive(new CommandContext(this, arg?.Player(), arg), arg?.Args);
 
         [ChatCommand("repair")]
-        private void CmdRepair(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Repair")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "repair")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdRepair(BasePlayer player, string cmd, string[] args) => HandleRepair(new CommandContext(this, player), args, false);
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            Item item = target.GetActiveItem();
-            if (item == null) { SendError(player, "You have no active item to repair."); return; }
-            if (item.condition >= item.maxCondition) { SendWarning(player, "Item is already at full condition."); return; }
-
-            item.Repair(true);
-            if (target == player)
-                SendSuccess(player, Lang("RepairDone"));
-            else
-                SendSuccess(player, Lang("RepairOther", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} repaired active item of {target.displayName}");
-        }
+        [ConsoleCommand("repair")]
+        private void CCmdRepair(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), arg?.Args, false);
 
         [ChatCommand("repairall")]
-        private void CmdRepairAll(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("RepairAll")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "repairall")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdRepairAll(BasePlayer player, string cmd, string[] args) => HandleRepair(new CommandContext(this, player), args, true);
 
-            BasePlayer target = player;
-            if (args.Length > 0)
-            {
-                target = FindPlayer(args[0]);
-                if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-                if (target != player && !CanTargetOthers(player))
-                { SendError(player, Lang("NoTargetPermission")); return; }
-            }
-
-            int repaired = 0;
-            foreach (var item in target.inventory.AllItems())
-            {
-                if (item.condition < item.maxCondition)
-                {
-                    item.Repair(true);
-                    repaired++;
-                }
-            }
-            if (repaired == 0) { SendWarning(player, "No items needed repair."); return; }
-            if (target == player)
-                SendSuccess(player, Lang("RepairAllDone"));
-            else
-                SendSuccess(player, Lang("RepairAllOther", player.UserIDString, target.displayName));
-            LogToConsole($"{player.displayName} repaired all items of {target.displayName} ({repaired} items)");
-        }
+        [ConsoleCommand("repairall")]
+        private void CCmdRepairAll(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), arg?.Args, true);
 
         [ChatCommand("kick")]
-        private void CmdKick(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Kick")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "kick")) { SendError(player, Lang("NoPermission")); return; }
-            if (args.Length < 1) { SendError(player, Lang("InvalidSyntax", player.UserIDString, "/kick <player> [reason]")); return; }
+        private void CmdKick(BasePlayer player, string cmd, string[] args) => HandleKick(new CommandContext(this, player), args);
 
-            BasePlayer target = FindPlayer(args[0]);
-            if (target == null) { SendError(player, Lang("PlayerNotFound")); return; }
-            if (target == player) { SendError(player, Lang("KickSelf")); return; }
-
-            string reason = args.Length > 1 ? string.Join(" ", args.Skip(1)) : "Kicked by admin.";
-            target.Kick(reason);
-            SendSuccess(player, Lang("KickSuccess", player.UserIDString, target.displayName, reason));
-            LogToConsole($"{player.displayName} kicked {target.displayName} (reason: {reason})");
-        }
+        [ConsoleCommand("kick")]
+        private void CCmdKick(ConsoleSystem.Arg arg) => HandleKick(new CommandContext(this, arg?.Player(), arg), arg?.Args);
 
         [ChatCommand("list")]
-        private void CmdList(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("List")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "list")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdList(BasePlayer player, string cmd, string[] args) => HandleList(new CommandContext(this, player), args);
 
-            var players = BasePlayer.activePlayerList;
-            if (players.Count == 0) { SendInfo(player, "No players online."); return; }
+        [ChatCommand("online")]
+        private void CmdOnline(BasePlayer player, string cmd, string[] args) => HandleList(new CommandContext(this, player), args);
 
-            SendInfo(player, Lang("ListHeader", player.UserIDString, players.Count));
-            foreach (var p in players)
-                SendInfo(player, Lang("ListEntry", player.UserIDString, p.displayName, p.UserIDString));
-        }
+        [ChatCommand("players")]
+        private void CmdPlayers(BasePlayer player, string cmd, string[] args) => HandleList(new CommandContext(this, player), args);
+
+        [ConsoleCommand("list")]
+        private void CCmdList(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        [ConsoleCommand("online")]
+        private void CCmdOnline(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        [ConsoleCommand("players")]
+        private void CCmdPlayers(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
 
         [ChatCommand("ping")]
-        private void CmdPing(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Ping")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "ping")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdPing(BasePlayer player, string cmd, string[] args) => HandlePing(new CommandContext(this, player), args);
 
-            int ping = player.net.connection.ping;
-            SendInfo(player, Lang("PingResult", player.UserIDString, ping));
-        }
+        [ConsoleCommand("ping")]
+        private void CCmdPing(ConsoleSystem.Arg arg) => HandlePing(new CommandContext(this, arg?.Player(), arg), arg?.Args);
 
         [ChatCommand("time")]
-        private void CmdTime(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Time")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "time")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdTime(BasePlayer player, string cmd, string[] args) => HandleTime(new CommandContext(this, player), false);
 
-            float time = TOD_Sky.Instance.Cycle.Hour;
-            SendInfo(player, Lang("TimeResult", player.UserIDString, $"{time:F2}"));
-        }
+        [ConsoleCommand("time")]
+        private void CCmdTime(ConsoleSystem.Arg arg) => HandleTime(new CommandContext(this, arg?.Player(), arg), false);
 
         [ChatCommand("day")]
-        private void CmdDay(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("DayNight")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "time.set")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdDay(BasePlayer player, string cmd, string[] args) => HandleTime(new CommandContext(this, player), true);
 
-            TOD_Sky.Instance.Cycle.Hour = 12f;
-            SendSuccess(player, Lang("DaySet"));
-            LogToConsole($"{player.displayName} set time to day");
-        }
+        [ConsoleCommand("day")]
+        private void CCmdDay(ConsoleSystem.Arg arg) => HandleTime(new CommandContext(this, arg?.Player(), arg), true);
 
         [ChatCommand("night")]
-        private void CmdNight(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("DayNight")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "time.set")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdNight(BasePlayer player, string cmd, string[] args) => HandleTime(new CommandContext(this, player), false, true);
 
-            TOD_Sky.Instance.Cycle.Hour = 0f;
-            SendSuccess(player, Lang("NightSet"));
-            LogToConsole($"{player.displayName} set time to night");
-        }
+        [ConsoleCommand("night")]
+        private void CCmdNight(ConsoleSystem.Arg arg) => HandleTime(new CommandContext(this, arg?.Player(), arg), false, true);
 
         [ChatCommand("rules")]
-        private void CmdRules(BasePlayer player, string cmd, string[] args)
-        {
-            if (!IsCommandEnabled("Rules")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "rules")) { SendError(player, Lang("NoPermission")); return; }
+        private void CmdRules(BasePlayer player, string cmd, string[] args) => HandleRules(new CommandContext(this, player));
 
-            string filePath = Path.Combine(Interface.Oxide.ConfigDirectory, _config.Settings.RulesFile);
-            if (!File.Exists(filePath))
+        [ConsoleCommand("rules")]
+        private void CCmdRules(ConsoleSystem.Arg arg) => HandleRules(new CommandContext(this, arg?.Player(), arg));
+
+        [ChatCommand("cwe")]
+        private void CmdCwe(BasePlayer player, string cmd, string[] args) => HandleCwe(new CommandContext(this, player), args);
+
+        [ConsoleCommand("cwe")]
+        private void CCmdCwe(ConsoleSystem.Arg arg) => HandleCwe(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        [ChatCommand("cweversion")]
+        private void CmdCweVersion(BasePlayer player, string cmd, string[] args) => HandleVersion(new CommandContext(this, player));
+
+        [ConsoleCommand("cweversion")]
+        private void CCmdCweVersion(ConsoleSystem.Arg arg) => HandleVersion(new CommandContext(this, arg?.Player(), arg));
+
+        [ConsoleCommand("cwe.reload")]
+        private void CCmdCweReload(ConsoleSystem.Arg arg) => HandleReload(new CommandContext(this, arg?.Player(), arg));
+
+        [ConsoleCommand("cwe.version")]
+        private void CCmdCweVersionDot(ConsoleSystem.Arg arg) => HandleVersion(new CommandContext(this, arg?.Player(), arg));
+
+        [ConsoleCommand("cwe.help")]
+        private void CCmdCweHelp(ConsoleSystem.Arg arg) => HandleHelp(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+
+        private void HandleHealth(CommandContext context, string[] args, string mode)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(mode == "heal" ? "Heal" : "Eat"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + mode))
             {
-                SendError(player, Lang("RulesNotFound"));
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
             }
 
-            var lines = File.ReadAllLines(filePath);
-            if (lines.Length == 0) { SendInfo(player, "No rules defined."); return; }
+            if (args == null) args = Array.Empty<string>();
+            BasePlayer target = context.Player;
 
-            SendInfo(player, Lang("RulesHeader"));
-            foreach (var line in lines)
-                SendInfo(player, Lang("RulesLine", player.UserIDString, line));
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            if (mode == "heal")
+            {
+                target.health = target.MaxHealth();
+                if (target.metabolism != null)
+                {
+                    target.metabolism.radiation_poison.value = 0f;
+                    target.metabolism.poison.value = 0f;
+                    target.metabolism.bleeding.value = 0f;
+                }
+
+                target.SendNetworkUpdateImmediate();
+                Reply(context, target == context.Player ? Lang("HealDone", context.UserId) : Lang("HealOther", context.UserId, target.displayName), "Success");
+                LogToConsole($"{context.Name} healed {target.displayName}");
+            }
+            else
+            {
+                if (target.metabolism != null)
+                {
+                    target.metabolism.calories.value = target.metabolism.calories.max;
+                    target.metabolism.hydration.value = target.metabolism.hydration.max;
+                }
+
+                target.SendNetworkUpdateImmediate();
+                Reply(context, target == context.Player ? Lang("EatDone", context.UserId) : Lang("EatOther", context.UserId, target.displayName), "Success");
+                LogToConsole($"{context.Name} fed and hydrated {target.displayName}");
+            }
         }
 
-        [ChatCommand("cwe")]
-        private void CmdCWE(BasePlayer player, string cmd, string[] args)
+        private void HandleClear(CommandContext context, string[] args)
         {
+            if (!IsPluginEnabled() || !IsCommandEnabled("Clear"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "clear"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            BasePlayer target = context.Player;
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            target.inventory?.Strip();
+            Reply(context, target == context.Player ? Lang("ClearDone", context.UserId) : Lang("ClearOther", context.UserId, target.displayName), "Success");
+            LogToConsole($"{context.Name} cleared inventory for {target.displayName}");
+        }
+
+        private void HandleGive(CommandContext context, string[] args)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("Give"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "give"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            if (args.Length < 2)
+            {
+                Reply(context, Lang("InvalidSyntax", context.UserId, "/give <item> <amount> [target]"), "Error");
+                return;
+            }
+
+            string itemName = args[0];
+            if (!TryParseInt(args[1], out int amount) || amount <= 0)
+            {
+                Reply(context, Lang("InvalidNumber", context.UserId), "Error");
+                return;
+            }
+
+            BasePlayer target = context.Player;
+            if (args.Length >= 3)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[2]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            ItemDefinition definition = ItemManager.FindItemDefinition(itemName);
+            if (definition == null)
+            {
+                Reply(context, Lang("GiveNotFound", context.UserId, itemName), "Error");
+                return;
+            }
+
+            Item item = ItemManager.Create(definition, amount);
+            if (item == null)
+            {
+                Reply(context, "Failed to create the item.", "Error");
+                return;
+            }
+
+            bool given = target.inventory != null && target.inventory.GiveItem(item);
+            if (!given)
+            {
+                item.Drop(target.transform.position + Vector3.up * 2f, Vector3.zero);
+                Reply(context, Lang("GiveDropped", context.UserId, target.displayName), "Warning");
+            }
+
+            string displayName = definition.displayName?.english ?? definition.shortname;
+            if (target == context.Player)
+                Reply(context, Lang("GiveSelf", context.UserId, displayName, amount), "Success");
+            else
+                Reply(context, Lang("GiveOther", context.UserId, displayName, amount, target.displayName), "Success");
+
+            LogToConsole($"{context.Name} gave {amount} x {definition.shortname} to {target.displayName}");
+        }
+
+        private void HandleRepair(CommandContext context, string[] args, bool repairAll)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(repairAll ? "RepairAll" : "Repair"))
+                return;
+
+            string permissionName = PermissionBase + (repairAll ? "repairall" : "repair");
+            if (context.Player != null && !HasPermission(context.Player, permissionName))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            BasePlayer target = context.Player;
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            int repaired = 0;
+            if (repairAll)
+            {
+                IEnumerable<Item> items = EnumeratePlayerItems(target);
+                foreach (Item item in items)
+                {
+                    if (item == null || !item.hasCondition)
+                        continue;
+
+                    item.condition = item.maxCondition;
+                    repaired++;
+                }
+
+                target.inventory?.SendSnapshot();
+                Reply(context, target == context.Player ? Lang("RepairAllDone", context.UserId) : Lang("RepairAllOther", context.UserId, target.displayName), "Success");
+            }
+            else
+            {
+                Item active = target.GetActiveItem();
+                if (active == null)
+                {
+                    Reply(context, "No active item found.", "Warning");
+                    return;
+                }
+
+                if (active.hasCondition)
+                {
+                    active.condition = active.maxCondition;
+                    repaired = 1;
+                }
+
+                target.inventory?.SendSnapshot();
+                Reply(context, target == context.Player ? Lang("RepairDone", context.UserId) : Lang("RepairOther", context.UserId, target.displayName), "Success");
+            }
+
+            LogToConsole($"{context.Name} repaired {(repairAll ? "all items" : "the active item")} for {target.displayName} ({repaired} item(s))");
+        }
+
+        private IEnumerable<Item> EnumeratePlayerItems(BasePlayer player)
+        {
+            if (player == null || player.inventory == null)
+                yield break;
+
+            foreach (Item item in player.inventory.containerBelt?.itemList ?? new List<Item>())
+                yield return item;
+
+            foreach (Item item in player.inventory.containerMain?.itemList ?? new List<Item>())
+                yield return item;
+
+            foreach (Item item in player.inventory.containerWear?.itemList ?? new List<Item>())
+                yield return item;
+        }
+
+        private void HandleKick(CommandContext context, string[] args)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("Kick"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "kick"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            if (args.Length < 1)
+            {
+                Reply(context, Lang("InvalidSyntax", context.UserId, "/kick <player> [reason]"), "Error");
+                return;
+            }
+
+            BasePlayer target = FindPlayer(args[0]);
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            if (context.Player != null && target == context.Player)
+            {
+                Reply(context, Lang("KickSelf", context.UserId), "Warning");
+                return;
+            }
+
+            string reason = args.Length > 1 ? string.Join(" ", args.Skip(1).ToArray()) : "Kicked by an administrator.";
+            target.Kick(reason);
+
+            Reply(context, Lang("KickSuccess", context.UserId, target.displayName, reason), "Success");
+            LogToConsole($"{context.Name} kicked {target.displayName} for: {reason}");
+        }
+
+        private void HandleList(CommandContext context, string[] args)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("List"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "list"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            List<BasePlayer> players = BasePlayer.activePlayerList.Where(p => p != null).OrderBy(p => p.displayName, StringComparer.OrdinalIgnoreCase).ToList();
+            Reply(context, Lang("ListHeader", context.UserId, players.Count), "Highlight", true);
+
+            foreach (BasePlayer player in players)
+                Reply(context, Lang("ListEntry", context.UserId, player.displayName, player.UserIDString), "Info");
+
+            LogToConsole($"{context.Name} requested the online player list ({players.Count} players).");
+        }
+
+        private void HandlePing(CommandContext context, string[] args)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("Ping"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "ping"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+            BasePlayer target = context.Player;
+
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            int ping = 0;
+            try
+            {
+                if (target.net?.connection != null)
+                    ping = target.net.connection.GetAveragePing();
+            }
+            catch
+            {
+                ping = 0;
+            }
+
+            if (target == context.Player)
+                Reply(context, Lang("PingResult", context.UserId, ping), "Info");
+            else
+                Reply(context, Lang("PingOtherResult", context.UserId, target.displayName, ping), "Info");
+
+            LogToConsole($"{context.Name} checked the ping for {target.displayName}: {ping} ms");
+        }
+
+        
+        private void HandleTime(CommandContext context, bool setDay = false, bool setNight = false)
+        {
+            bool isSetCommand = setDay || setNight;
+
+            if (!IsPluginEnabled() || !(isSetCommand ? IsCommandEnabled("DayNight") : IsCommandEnabled("Time")))
+                return;
+
+            if (context.Player != null)
+            {
+                string permissionName = isSetCommand ? PermissionBase + "time.set" : PermissionBase + "time";
+                if (!HasPermission(context.Player, permissionName))
+                {
+                    Reply(context, Lang("NoPermission", context.UserId), "Error");
+                    return;
+                }
+            }
+
+            if (isSetCommand)
+            {
+                if (TOD_Sky.Instance == null || TOD_Sky.Instance.Cycle == null)
+                {
+                    Reply(context, Lang("TimeSystemUnavailable", context.UserId), "Error");
+                    return;
+                }
+
+                TOD_Sky.Instance.Cycle.Hour = setNight ? 0f : 12f;
+                Reply(context, setNight ? Lang("NightSet", context.UserId) : Lang("DaySet", context.UserId), "Success");
+                LogToConsole($"{context.Name} set the time to {(setNight ? "night" : "day")}.");
+                return;
+            }
+
+            if (TOD_Sky.Instance == null || TOD_Sky.Instance.Cycle == null)
+            {
+                Reply(context, Lang("TimeSystemUnavailable", context.UserId), "Error");
+                return;
+            }
+
+            float hour = TOD_Sky.Instance.Cycle.Hour;
+            Reply(context, Lang("TimeResult", context.UserId, hour.ToString("F2", CultureInfo.InvariantCulture)), "Info");
+        }
+
+        private void HandleRules(CommandContext context)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled("Rules"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "rules"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            string path = GetRulesFilePath();
+            if (!File.Exists(path))
+            {
+                Reply(context, Lang("RulesNotFound", context.UserId), "Error");
+                return;
+            }
+
+            string[] lines;
+            try
+            {
+                lines = File.ReadAllLines(path);
+            }
+            catch (Exception ex)
+            {
+                Reply(context, Lang("RulesReadFailed", context.UserId), "Error");
+                PrintError($"Failed to read rules file '{path}': {ex}");
+                return;
+            }
+
+            if (lines.Length == 0)
+            {
+                Reply(context, Lang("NoRulesDefined", context.UserId), "Warning");
+                return;
+            }
+
+            Reply(context, Lang("RulesHeader", context.UserId), "Highlight", true);
+            foreach (string line in lines)
+                Reply(context, Lang("RulesLine", context.UserId, line), "Info");
+        }
+
+        private void HandleCwe(CommandContext context, string[] args)
+        {
+            if (args == null) args = Array.Empty<string>();
             if (args.Length == 0)
             {
-                ShowHelp(player, 1);
+                HandleHelp(context, Array.Empty<string>());
                 return;
             }
 
             switch (args[0].ToLowerInvariant())
             {
                 case "help":
-                    int page = 1;
-                    if (args.Length > 1 && int.TryParse(args[1], out page))
-                        ShowHelp(player, page);
-                    else
-                        ShowHelp(player, 1);
-                    break;
-
+                    HandleHelp(context, args.Skip(1).ToArray());
+                    return;
                 case "reload":
-                    CmdReload(player, cmd, args.Skip(1).ToArray());
-                    break;
-
+                    HandleReload(context);
+                    return;
                 case "version":
-                    CmdVersion(player, cmd, args.Skip(1).ToArray());
-                    break;
-
+                    HandleVersion(context);
+                    return;
                 default:
-                    SendError(player, Lang("UnknownCommand"));
-                    break;
+                    Reply(context, Lang("UnknownCommand", context.UserId), "Error");
+                    return;
             }
         }
 
-        private void ShowHelp(BasePlayer player, int page)
+        private void HandleHelp(CommandContext context, string[] args)
         {
-            if (!IsCommandEnabled("Help")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "help")) { SendError(player, Lang("NoPermission")); return; }
+            if (!IsPluginEnabled())
+                return;
 
-            var lines = new List<string>();
-            // Build help entries for all enabled commands that the player has permission for.
-            // We'll just list all commands (the help itself doesn't require per-command permission? We can still show all).
-            // We'll show categories.
-
-            // Gather available commands (only those enabled and that the player has permission for)
-            var commands = new Dictionary<string, string>
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "help"))
             {
-                { "maintenance", "Manage maintenance mode" },
-                { "god", "Toggle god mode" },
-                { "fly", "Toggle flight mode" },
-                { "noclip", "Toggle noclip mode" },
-                { "vanish", "Toggle vanish mode" },
-                { "speed", "Set movement speed" },
-                { "tp", "Teleport to player" },
-                { "tphere", "Teleport player to you" },
-                { "tploc", "Teleport to coordinates" },
-                { "heal", "Fully heal yourself or target" },
-                { "eat", "Restore food and water" },
-                { "clear", "Clear inventory" },
-                { "give", "Give item to player" },
-                { "repair", "Repair active item" },
-                { "repairall", "Repair all items" },
-                { "kick", "Kick player" },
-                { "list", "List online players" },
-                { "ping", "Show your ping" },
-                { "time", "Show current time" },
-                { "day", "Set time to day" },
-                { "night", "Set time to night" },
-                { "rules", "Show server rules" },
-                { "cwe help", "Show this help" },
-                { "cwe reload", "Reload plugin" },
-                { "cwe version", "Show version" }
-            };
-
-            foreach (var kv in commands)
-            {
-                string cmdName = kv.Key.Replace(" ", ""); // strip spaces for command name lookup
-                // Check if command is enabled and player has permission (if not admin)
-                if (!IsCommandEnabled(cmdName)) continue;
-                string perm = PermissionBase + cmdName;
-                if (!HasPermission(player, perm) && !IsAdmin(player)) continue; // skip if no permission
-                // Allow help command always if they got this far
-                lines.Add($"<color={_config.Settings.Colors.Highlight}>/{kv.Key}</color> - {kv.Value}");
-            }
-
-            if (lines.Count == 0)
-            {
-                SendInfo(player, Lang("HelpNoCommands"));
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
             }
 
-            // Pagination
-            int perPage = 8;
-            int totalPages = Mathf.CeilToInt((float)lines.Count / perPage);
-            page = Mathf.Clamp(page, 1, totalPages);
-            int start = (page - 1) * perPage;
-            int end = Mathf.Min(start + perPage, lines.Count);
+            int page = 1;
+            if (args != null && args.Length > 0)
+                int.TryParse(args[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out page);
 
-            SendMessage(player, Lang("HelpHeader"), "Highlight");
-            SendMessage(player, Lang("HelpPage", player.UserIDString, page, totalPages), "Info");
+            var entries = BuildHelpEntries(context);
+            if (entries.Count == 0)
+            {
+                Reply(context, Lang("HelpNoCommands", context.UserId), "Info");
+                return;
+            }
+
+            const int perPage = 8;
+            int totalPages = Mathf.CeilToInt(entries.Count / (float)perPage);
+            page = Mathf.Clamp(page, 1, totalPages);
+
+            int start = (page - 1) * perPage;
+            int end = Math.Min(start + perPage, entries.Count);
+
+            Reply(context, Lang("HelpHeader", context.UserId), "Highlight", true);
+            Reply(context, Lang("HelpPage", context.UserId, page, totalPages), "Info");
+
             for (int i = start; i < end; i++)
-                SendInfo(player, lines[i]);
+                Reply(context, Lang("HelpLine", context.UserId, entries[i].Command, entries[i].Description), "Info");
         }
 
-        private void CmdReload(BasePlayer player, string cmd, string[] args)
+        
+        private List<HelpEntry> BuildHelpEntries(CommandContext context)
         {
-            if (!IsCommandEnabled("Reload")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "reload")) { SendError(player, Lang("NoPermission")); return; }
+            var items = new List<HelpEntry>
+            {
+                new HelpEntry("maintenance", "Toggle maintenance mode and manage its whitelist.", "Maintenance"),
+                new HelpEntry("god", "Toggle invulnerability for yourself or another player.", "God"),
+                new HelpEntry("fly", "Toggle flight mode for yourself or another player.", "Fly"),
+                new HelpEntry("noclip", "Toggle noclip mode for yourself or another player.", "Noclip"),
+                new HelpEntry("vanish", "Toggle invisibility for yourself or another player.", "Vanish"),
+                new HelpEntry("speed", "Set movement speed for yourself or another player.", "Speed"),
+                new HelpEntry("tp", "Teleport to a player.", "TP"),
+                new HelpEntry("tphere", "Teleport a player to your location.", "TPHere"),
+                new HelpEntry("tploc", "Teleport to coordinates.", "TPLoc"),
+                new HelpEntry("heal", "Restore health for yourself or another player.", "Heal"),
+                new HelpEntry("eat", "Restore food and water for yourself or another player.", "Eat"),
+                new HelpEntry("clear", "Clear inventory for yourself or another player.", "Clear"),
+                new HelpEntry("give", "Give an item to yourself or another player.", "Give"),
+                new HelpEntry("repair", "Repair the active item.", "Repair"),
+                new HelpEntry("repairall", "Repair all items in inventory.", "RepairAll"),
+                new HelpEntry("kick", "Kick a player from the server.", "Kick"),
+                new HelpEntry("list", "List online players.", "List"),
+                new HelpEntry("online", "List online players.", "List"),
+                new HelpEntry("players", "List online players.", "List"),
+                new HelpEntry("ping", "Show ping for yourself or another player.", "Ping"),
+                new HelpEntry("time", "Show the current in-game time.", "Time"),
+                new HelpEntry("day", "Set the world time to day.", "DayNight"),
+                new HelpEntry("night", "Set the world time to night.", "DayNight"),
+                new HelpEntry("rules", "Show server rules from file.", "Rules"),
+                new HelpEntry("cwe help", "Show this help page.", "Help"),
+                new HelpEntry("cwe reload", "Reload the plugin configuration and data.", "Reload"),
+                new HelpEntry("cwe version", "Show the plugin version.", "Version")
+            };
+
+            var output = new List<HelpEntry>();
+            foreach (HelpEntry entry in items)
+            {
+                if (!IsCommandEnabled(entry.ConfigName))
+                    continue;
+
+                if (context.Player != null)
+                {
+                    string permissionName = GetHelpPermissionName(entry.ConfigName);
+                    if (!HasPermission(context.Player, permissionName) && !IsAdmin(context.Player))
+                        continue;
+                }
+
+                output.Add(entry);
+            }
+
+            output.Sort((a, b) => string.Compare(a.Command, b.Command, StringComparison.OrdinalIgnoreCase));
+            return output;
+        }
+
+        private void HandleReload(CommandContext context)
+        {
+            if (!IsCommandEnabled("Reload"))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "reload"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
 
             try
             {
                 LoadConfig();
                 LoadData();
                 RegisterPermissions();
-                // Reapply maintenance if enabled
-                if (_config.Maintenance.Enabled) EnforceMaintenanceKick();
-                SendSuccess(player, Lang("ReloadSuccess"));
-                LogToConsole($"Reloaded by {player.displayName}");
+
+                if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
+                    KickPlayersForMaintenance();
+
+                Reply(context, Lang("ReloadSuccess", context.UserId), "Success");
+                LogToConsole($"{context.Name} reloaded the plugin.");
             }
             catch (Exception ex)
             {
-                SendError(player, Lang("ReloadFailed"));
-                PrintError($"Reload error: {ex}");
+                Reply(context, Lang("ReloadFailed", context.UserId), "Error");
+                PrintError($"Reload failed: {ex}");
             }
         }
 
-        private void CmdVersion(BasePlayer player, string cmd, string[] args)
+        private void HandleVersion(CommandContext context)
         {
-            if (!IsCommandEnabled("Version")) { SendError(player, Lang("CommandDisabled")); return; }
-            if (!HasPermission(player, PermissionBase + "version")) { SendError(player, Lang("NoPermission")); return; }
+            if (!IsCommandEnabled("Version"))
+                return;
 
-            SendInfo(player, Lang("VersionMessage", player.UserIDString, PluginVersion));
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "version"))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            Reply(context, Lang("VersionMessage", context.UserId, PluginVersion), "Info");
+        }
+
+        private string GetHelpPermissionName(string configName)
+        {
+            if (string.IsNullOrEmpty(configName))
+                return PermissionBase;
+
+            switch (configName)
+            {
+                case "DayNight":
+                    return PermissionBase + "time.set";
+                case "Help":
+                    return PermissionBase + "help";
+                case "Reload":
+                    return PermissionBase + "reload";
+                case "Version":
+                    return PermissionBase + "version";
+                default:
+                    return PermissionBase + configName.ToLowerInvariant();
+            }
+        }
+
+        private class HelpEntry
+        {
+            public HelpEntry(string command, string description, string configName)
+            {
+                Command = command;
+                Description = description;
+                ConfigName = configName;
+            }
+
+            public string Command { get; }
+            public string Description { get; }
+            public string ConfigName { get; }
         }
 
         #endregion
 
         #region Hooks
 
-        // Handle God mode (block damage)
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
-            if (entity == null || info == null) return null;
-            if (!_config.Commands.God.Enabled) return null;
+            if (!IsPluginEnabled() || entity == null || info == null || _config?.Commands?.God?.Enabled != true)
+                return null;
 
             BasePlayer player = entity as BasePlayer;
-            if (player == null) return null;
+            if (player == null)
+                return null;
 
-            var state = GetState(player);
-            if (state.God)
-            {
-                // Block all damage
-                return false;
-            }
-            return null;
+            PlayerState state = GetState(player);
+            return state != null && state.God ? (object)false : null;
         }
 
-        // Maintain fly/noclip flags and speed on tick (to prevent server reset)
         private object OnPlayerTick(BasePlayer player, PlayerTick msg, bool wasStalled)
         {
-            if (player == null || !player.IsConnected) return null;
-            if (!_config.Settings.Enabled) return null;
+            if (!IsPluginEnabled() || player == null || !player.IsConnected)
+                return null;
 
-            var state = GetState(player);
+            PlayerState state = GetState(player);
+            if (state == null)
+                return null;
 
-            // Fly
+            if (state.God)
+            {
+                // God mode is enforced through the damage hook.
+            }
+
             if (state.Fly && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, true);
-
-            if (!state.Fly && player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
+            else if (!state.Fly && player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, false);
 
-            // Noclip
             if (state.Noclip && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, true);
-
-            if (!state.Noclip && player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
+            else if (!state.Noclip && player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, false);
 
-            // Vanish (invisible)
             if (state.Vanish && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, true);
-
-            if (!state.Vanish && player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
+            else if (!state.Vanish && player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
                 player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, false);
 
-            // Speed (apply if different from 1)
-            float targetSpeed = state.Speed;
-            if (Mathf.Abs(player.walkSpeed - targetSpeed) > 0.01f || Mathf.Abs(player.runSpeed - targetSpeed) > 0.01f)
+            if (Mathf.Abs(player.walkSpeed - state.Speed) > 0.01f || Mathf.Abs(player.runSpeed - state.Speed) > 0.01f)
             {
-                player.walkSpeed = targetSpeed;
-                player.runSpeed = targetSpeed;
+                player.walkSpeed = state.Speed;
+                player.runSpeed = state.Speed;
             }
 
             return null;
         }
 
-        // On player connected - if maintenance enabled, kick non-whitelisted
         private void OnPlayerConnected(BasePlayer player)
         {
-            if (player == null) return;
-            if (_config.Maintenance.Enabled)
-            {
-                if (!HasPermission(player, "cwessentials.maintenance.bypass"))
-                {
-                    NextTick(() => player.Kick(_config.Settings.MaintenanceMessage));
-                }
-            }
-        }
+            if (!IsPluginEnabled() || player == null || _config?.Maintenance?.Enabled != true)
+                return;
 
-        // On player disconnected - we might want to clear state? But we keep data for reconnect.
-        // Nothing special.
+            if (!HasMaintenanceBypass(player))
+                NextTick(() => player.Kick(_config.Settings.MaintenanceMessage));
+        }
 
         #endregion
     }
