@@ -12,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.2.2")]
+    [Info("CWEssentials", "whitecristafer", "1.2.3")]
     [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.2.2";
+        private const string PluginVersion = "1.2.3";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -27,6 +27,7 @@ namespace Oxide.Plugins
 
         private PluginConfig _config;
         private StoredData _data;
+        private Timer _maintenanceTimer;
 
         #region Configuration
 
@@ -646,9 +647,30 @@ namespace Oxide.Plugins
                 if (player == null)
                     continue;
 
-                if (!HasMaintenanceBypass(player))
-                    player.Kick(_config.Settings.MaintenanceMessage);
+                KickPlayerForMaintenance(player);
             }
+        }
+
+        private void KickPlayerForMaintenance(BasePlayer player)
+        {
+            if (player == null || !IsPluginEnabled() || _config?.Maintenance?.Enabled != true)
+                return;
+
+            if (HasMaintenanceBypass(player))
+                return;
+
+            player.Kick(_config?.Settings?.MaintenanceMessage ?? DefaultMaintenanceMessage);
+        }
+
+        private void RefreshMaintenanceTimer()
+        {
+            _maintenanceTimer?.Destroy();
+            _maintenanceTimer = null;
+
+            if (!IsPluginEnabled() || _config?.Maintenance?.Enabled != true)
+                return;
+
+            _maintenanceTimer = timer.Every(30f, KickPlayersForMaintenance);
         }
 
         private void EnsurePlayerState(BasePlayer player)
@@ -735,6 +757,7 @@ namespace Oxide.Plugins
             if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
                 KickPlayersForMaintenance();
 
+            RefreshMaintenanceTimer();
             PrintBanner();
         }
 
@@ -745,10 +768,22 @@ namespace Oxide.Plugins
 
             if (_data.PlayerStates.TryGetValue(player.userID, out PlayerState state))
                 state.MovementSynced = false;
+
+            if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
+            {
+                timer.Once(1f, () =>
+                {
+                    if (player != null && player.IsConnected)
+                        KickPlayerForMaintenance(player);
+                });
+            }
         }
 
         private void Unload()
         {
+            _maintenanceTimer?.Destroy();
+            _maintenanceTimer = null;
+
             try
             {
                 foreach (BasePlayer player in BasePlayer.activePlayerList)
@@ -844,6 +879,7 @@ namespace Oxide.Plugins
                 {
                     _config.Maintenance.Enabled = true;
                     SaveConfig();
+                    RefreshMaintenanceTimer();
                     KickPlayersForMaintenance();
                     Reply(context, Lang("MaintenanceOn", context.UserId), "Success");
                     LogToConsole($"Maintenance mode enabled by {context.Name}");
@@ -852,6 +888,7 @@ namespace Oxide.Plugins
                 {
                     _config.Maintenance.Enabled = false;
                     SaveConfig();
+                    RefreshMaintenanceTimer();
                     Reply(context, Lang("MaintenanceOff", context.UserId), "Success");
                     LogToConsole($"Maintenance mode disabled by {context.Name}");
                 }
@@ -1785,10 +1822,30 @@ namespace Oxide.Plugins
             }
 
             List<BasePlayer> players = BasePlayer.activePlayerList.Where(p => p != null).OrderBy(p => p.displayName, StringComparer.OrdinalIgnoreCase).ToList();
-            Reply(context, Lang("ListHeader", context.UserId, players.Count), "Highlight", true);
+            if (players.Count == 0)
+            {
+                Reply(context, Lang("ListHeader", context.UserId, 0), "Highlight", true);
+                Reply(context, "No players are currently online.", "Info");
+                return;
+            }
 
-            foreach (BasePlayer player in players)
-                Reply(context, Lang("ListEntry", context.UserId, player.displayName, player.UserIDString), "Info");
+            List<string> entries = players
+                .Select(player => Lang("ListEntry", context.UserId, player.displayName, player.UserIDString))
+                .ToList();
+
+            if (players.Count <= 30)
+            {
+                Reply(context, $"{Lang("ListHeader", context.UserId, players.Count)}\n{string.Join(", ", entries)}", "Highlight", true);
+            }
+            else
+            {
+                int splitIndex = (players.Count + 1) / 2;
+                string firstHalf = string.Join(", ", entries.Take(splitIndex));
+                string secondHalf = string.Join(", ", entries.Skip(splitIndex));
+
+                Reply(context, $"{Lang("ListHeader", context.UserId, players.Count)} (1/2)\n{firstHalf}", "Highlight", true);
+                Reply(context, $"{Lang("ListHeader", context.UserId, players.Count)} (2/2)\n{secondHalf}", "Info");
+            }
 
             LogToConsole($"{context.Name} requested the online player list ({players.Count} players).");
         }
@@ -1919,15 +1976,39 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (lines.Length == 0)
+            List<string> rules = lines
+                .Select(line => line?.TrimEnd('\r'))
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => line.Trim())
+                .ToList();
+
+            if (rules.Count == 0)
             {
                 Reply(context, Lang("NoRulesDefined", context.UserId), "Warning");
                 return;
             }
 
             Reply(context, Lang("RulesHeader", context.UserId), "Highlight", true);
-            foreach (string line in lines)
-                Reply(context, Lang("RulesLine", context.UserId, line), "Info");
+
+            const int maxCharsPerMessage = 700;
+            string currentChunk = string.Empty;
+
+            foreach (string rule in rules)
+            {
+                string nextLine = string.IsNullOrEmpty(currentChunk) ? rule : currentChunk + "\n" + rule;
+
+                if (nextLine.Length > maxCharsPerMessage && !string.IsNullOrEmpty(currentChunk))
+                {
+                    Reply(context, currentChunk, "Info");
+                    currentChunk = rule;
+                    continue;
+                }
+
+                currentChunk = nextLine;
+            }
+
+            if (!string.IsNullOrEmpty(currentChunk))
+                Reply(context, currentChunk, "Info");
         }
 
         private void HandleCwe(CommandContext context, string[] args)
@@ -2062,6 +2143,7 @@ namespace Oxide.Plugins
                 LoadConfig();
                 LoadData();
                 RegisterPermissions();
+                RefreshMaintenanceTimer();
 
                 if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
                     KickPlayersForMaintenance();
