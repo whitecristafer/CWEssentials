@@ -5,6 +5,9 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Facepunch;
+using HarmonyLib;
+using Network;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Game.Rust.Cui;
@@ -12,10 +15,10 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.3.7", ResourceId = 258869)]
+    [Info("CWEssentials", "whitecristafer", "1.4.1", ResourceId = 258869)]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.3.7";
+        private const string PluginVersion = "1.4.1";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -27,7 +30,7 @@ namespace Oxide.Plugins
         private PluginConfig _config;
         private StoredData _data;
         private Timer _maintenanceTimer;
-        private const string VanishBadgeUiName = "CWEssentials.VanishBadge";
+        private Harmony _vanishHarmony;
 
         #region Configuration
 
@@ -56,24 +59,6 @@ namespace Oxide.Plugins
 
             [JsonProperty("PluginIcon")]
             public ulong PluginIcon = DefaultPluginIcon;
-
-            [JsonProperty("Show Vanish Badge")]
-            public bool ShowVanishBadge = true;
-
-            [JsonProperty("Vanish Badge Text")]
-            public string VanishBadgeText = "👻 VANISH";
-
-            [JsonProperty("Vanish Badge Color")]
-            public string VanishBadgeColor = "0.95 0.85 1 0.95";
-
-            [JsonProperty("Vanish Badge Background")]
-            public string VanishBadgeBackground = "0 0 0 0.35";
-
-            [JsonProperty("Vanish Badge Anchor Min")]
-            public string VanishBadgeAnchorMin = "0.40 0.92";
-
-            [JsonProperty("Vanish Badge Anchor Max")]
-            public string VanishBadgeAnchorMax = "0.60 0.97";
 
             [JsonProperty("MessageSize")]
             public int MessageSize = 14;
@@ -242,6 +227,10 @@ namespace Oxide.Plugins
         private class StoredData
         {
             public Dictionary<ulong, PlayerState> PlayerStates = new Dictionary<ulong, PlayerState>();
+
+            // Players who had vanish active at the time of the server exit/restart — to restore
+            // status at the next login without having to call the command again.
+            public HashSet<ulong> VanishedOffline = new HashSet<ulong>();
         }
 
         private class PlayerState
@@ -267,6 +256,14 @@ namespace Oxide.Plugins
 
             if (_data == null) _data = new StoredData();
             if (_data.PlayerStates == null) _data.PlayerStates = new Dictionary<ulong, PlayerState>();
+            if (_data.VanishedOffline == null) _data.VanishedOffline = new HashSet<ulong>();
+
+            _networkHiddenIds.Clear();
+            foreach (KeyValuePair<ulong, PlayerState> pair in _data.PlayerStates)
+            {
+                if (pair.Value != null && pair.Value.Vanish)
+                    _networkHiddenIds.Add(pair.Key);
+            }
         }
 
         private void SaveData()
@@ -337,10 +334,10 @@ namespace Oxide.Plugins
                 ["NoclipOff"] = "Noclip mode disabled.",
                 ["NoclipOnOther"] = "Noclip mode enabled for {0}.",
                 ["NoclipOffOther"] = "Noclip mode disabled for {0}.",
-                ["VanishOn"] = "👻 Vanish mode enabled.",
-                ["VanishOff"] = "👻 Vanish mode disabled.",
-                ["VanishOnOther"] = "👻 Vanish mode enabled for {0}.",
-                ["VanishOffOther"] = "👻 Vanish mode disabled for {0}.",
+                ["VanishOn"] = "Vanish mode enabled.",
+                ["VanishOff"] = "Vanish mode disabled.",
+                ["VanishOnOther"] = "Vanish mode enabled for {0}.",
+                ["VanishOffOther"] = "Vanish mode disabled for {0}.",
                 ["SpeedSet"] = "Speed set to {0}.",
                 ["SpeedSetOther"] = "Speed set to {0} for {1}.",
                 ["SpeedReset"] = "Speed reset to normal.",
@@ -522,58 +519,36 @@ namespace Oxide.Plugins
             state.MovementSynced = true;
         }
 
+        private const string VanishGhostUiName = "CWEssentials.VanishGhostUI";
+
+        // Harmony-the patches below are executed in a static context and do not have access to the instance
+        // plug-in (and to _data), so the current list of hidden player userids is duplicated here.
+        // SyncVanishState remains the source of truth — it also keeps this set up to date.
+        private static readonly HashSet<ulong> _networkHiddenIds = new HashSet<ulong>();
+
+        // The only source of truth is "is the player really hidden now" — previously, a match was required
+        // there are 4 conditions at once, including the live VanishVisualState component. If the component was lost
+        // (recreating the GameObject with wound/respawn), this check would falsely return false, and
+        // OnPlayerTick would try to reinitialize vanish every tick on top of those already applied
+        // network flags — state misalignment. Now this is one field-the network flag, the component
+        // is restored separately and is not a condition for "whether vanish is enabled at all".
         private bool IsVanishEnabled(BasePlayer player)
         {
-            return player != null && player._limitedNetworking;
+            return player != null && player.limitNetworking && player.isInvisible;
         }
 
-        private bool HasSavedVanishState(BasePlayer player)
+        private bool IsPlayerMarkedVanished(BasePlayer player)
         {
             if (player == null || _data?.PlayerStates == null)
                 return false;
 
-            return _data.PlayerStates.TryGetValue(player.userID, out PlayerState state) && state?.Vanish == true;
+            return _data.PlayerStates.TryGetValue(player.userID, out PlayerState state) && state != null && state.Vanish;
         }
 
-        private void UpdateVanishBadge(BasePlayer player, bool enabled)
-        {
-            if (player == null)
-                return;
-
-            CuiHelper.DestroyUi(player, VanishBadgeUiName);
-
-            if (!enabled || _config?.Settings?.ShowVanishBadge != true)
-                return;
-
-            string text = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeText) ? "👻 VANISH" : _config.Settings.VanishBadgeText;
-            string background = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeBackground) ? "0 0 0 0.35" : _config.Settings.VanishBadgeBackground;
-            string color = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeColor) ? "0.95 0.85 1 0.95" : _config.Settings.VanishBadgeColor;
-            string anchorMin = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeAnchorMin) ? "0.40 0.92" : _config.Settings.VanishBadgeAnchorMin;
-            string anchorMax = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeAnchorMax) ? "0.60 0.97" : _config.Settings.VanishBadgeAnchorMax;
-
-            var container = new CuiElementContainer();
-            var panel = container.Add(new CuiPanel
-            {
-                Image = { Color = background },
-                RectTransform = { AnchorMin = anchorMin, AnchorMax = anchorMax },
-                CursorEnabled = false
-            }, "Hud", VanishBadgeUiName);
-
-            container.Add(new CuiLabel
-            {
-                Text =
-                {
-                    Text = text,
-                    FontSize = 14,
-                    Align = TextAnchor.MiddleCenter,
-                    Color = color
-                },
-                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" }
-            }, panel);
-
-            CuiHelper.AddUi(player, container);
-        }
-
+        // Idempotently adjusts the player's real state to the desired one (enabled).
+        // You can call as many times as you want in a row with the same enabled without side effects —
+        // this fixes a race in which a repeat call with the state already applied is either nothing
+        // did not do it (and the visual component was not restored), or partially replayed the steps.
         private void SyncVanishState(BasePlayer player, bool enabled)
         {
             if (player == null)
@@ -581,41 +556,144 @@ namespace Oxide.Plugins
 
             if (enabled)
             {
-                if (player._limitedNetworking && player.limitNetworking)
-                {
-                    UpdateVanishBadge(player, true);
-                    return;
-                }
+                bool wasAlreadyLimited = player._limitedNetworking;
 
-                BaseEntity.Query.Server.RemovePlayer(player);
+                if (!wasAlreadyLimited)
+                {
+                    BaseEntity.Query.Server.RemovePlayer(player);
+                    player.DisablePlayerCollider();
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.ReceivingSnapshot, false);
+                }
 
                 player._limitedNetworking = true;
                 player.syncPosition = false;
                 player.limitNetworking = true;
                 player.isInvisible = true;
-                player.DisablePlayerCollider();
+                player.lastAdminCheatTime = float.MaxValue;
+
+                _networkHiddenIds.Add(player.userID);
+
+                // Visual state (hiding renders, UI) is applied independently of network
+                // flags and whether the plugin is enabled in the config — previously SendNetworkUpdateImmediate
+                // was only called when _config.Settings.Enabled == true, which caused the plugin
+                // to "freeze" already active vanish states in an inconsistent condition.
+                ApplyVanishVisualState(player, true);
+
+                // Network flags alone are not enough: already connected clients will continue to consider themselves
+                // subscribed to this player until they reconnect or until the server itself
+                // will rebuild their list of visible entities. We are clearly forcing all other clients
+                // forget the player right now, rather than waiting for reconnection.
+                ForceForgetVanishedPlayer(player);
+
                 player.UpdateNetworkGroup();
+                player.SendNetworkUpdate();
                 player.SendNetworkUpdateImmediate();
-                UpdateVanishBadge(player, true);
+                player.GetHeldEntity()?.SendNetworkUpdate();
+
                 return;
             }
 
-            if (!player._limitedNetworking && !player.limitNetworking && !player.isInvisible)
-            {
-                UpdateVanishBadge(player, false);
-                return;
-            }
+            bool wasHidden = player._limitedNetworking || player.limitNetworking || player.isInvisible;
+
+            ApplyVanishVisualState(player, false);
 
             player._limitedNetworking = false;
             player.syncPosition = true;
             player.limitNetworking = false;
             player.isInvisible = false;
+            player.lastAdminCheatTime = Time.realtimeSinceStartup;
 
-            BaseEntity.Query.Server.AddPlayer(player);
-            player.EnablePlayerCollider();
+            _networkHiddenIds.Remove(player.userID);
+
+            if (wasHidden)
+            {
+                BaseEntity.Query.Server.AddPlayer(player);
+                player.EnablePlayerCollider();
+            }
+
             player.UpdateNetworkGroup();
-            player.SendNetworkUpdateImmediate();
-            UpdateVanishBadge(player, false);
+            player.SendNetworkUpdate();
+            player.GetHeldEntity()?.SendNetworkUpdate();
+
+            if (player.IsConnected)
+                player.SendNetworkUpdateImmediate();
+        }
+
+            // limitNetworking/isInvisible flags by themselves do not unsubscribe already connected clients —
+            // they just don't let you re-subscribe. Player subscriptions already issued to other clients
+            // continue to operate until there is a remodeling or other restructuring of the network group.
+            // Here we forcibly send the "forget" this player command to all other connections.
+        private void ForceForgetVanishedPlayer(BasePlayer player)
+        {
+            if (player == null || Net.sv == null)
+                return;
+
+            List<Connection> others = Pool.Get<List<Connection>>();
+            try
+            {
+                foreach (Connection connection in Net.sv.connections)
+                {
+                    if (connection == null || !connection.connected || !connection.isAuthenticated)
+                        continue;
+
+                    if (!(connection.player is BasePlayer viewer) || viewer == player)
+                        continue;
+
+                    others.Add(connection);
+                }
+
+                if (others.Count > 0)
+                    player.OnNetworkSubscribersLeave(others);
+            }
+            finally
+            {
+                Pool.FreeUnmanaged(ref others);
+            }
+
+            if (ServerOcclusion.OcclusionEnabled)
+                player.OcclusionMakeSubscribersForget();
+        }
+
+        private void ApplyVanishVisualState(BasePlayer player, bool enabled)
+        {
+            if (player == null || player.gameObject == null)
+                return;
+
+            VanishVisualState visualState;
+            if (enabled)
+            {
+                if (!player.TryGetComponent<VanishVisualState>(out visualState))
+                    visualState = player.gameObject.AddComponent<VanishVisualState>();
+
+                visualState.SetHidden(true);
+                CuiHelper.DestroyUi(player, VanishGhostUiName);
+                CuiHelper.AddUi(player, CreateVanishGhostUI());
+                return;
+            }
+
+            CuiHelper.DestroyUi(player, VanishGhostUiName);
+
+            if (player.TryGetComponent<VanishVisualState>(out visualState))
+                UnityEngine.Object.Destroy(visualState);
+        }
+
+        private CuiElementContainer CreateVanishGhostUI()
+        {
+            CuiElementContainer elements = new CuiElementContainer();
+            string panel = elements.Add(new CuiPanel
+            {
+                Image = { Color = "0 0 0 0" },
+                RectTransform = { AnchorMin = "0.43 0.93", AnchorMax = "0.57 0.985" },
+                CursorEnabled = false
+            }, "Hud", VanishGhostUiName);
+
+            elements.Add(new CuiLabel
+            {
+                Text = { Text = "👻 GHOST MODE", FontSize = 16, Align = TextAnchor.MiddleCenter, Color = "0.92 0.82 1 0.97" },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" }
+            }, panel);
+
+            return elements;
         }
 
         private string FormatChatMessage(string message, string colorKey = "Info", bool useTitleSize = false)
@@ -852,6 +930,20 @@ namespace Oxide.Plugins
             LoadConfig();
             LoadData();
             RegisterPermissions();
+
+            // limitNetworking/isInvisible flags by themselves do not unsubscribe already connected clients —
+            // they just don't let you re-subscribe. Player subscriptions already issued to other clients
+            // continue to operate until there is a remodeling or other restructuring of the network group.
+            // Here we forcibly send the "forget" this player command to all other connections.
+            try
+            {
+                _vanishHarmony = new Harmony("cwessentials.vanish." + Name);
+                ApplyVanishHarmonyPatches();
+            }
+            catch (Exception ex)
+            {
+                PrintWarning($"Harmony patching failed, low-level vanish fixes will be inactive: {ex.Message}");
+            }
         }
 
         private void OnServerInitialized()
@@ -874,18 +966,10 @@ namespace Oxide.Plugins
 
                 if (state.Vanish)
                 {
-                    timer.Once(0.2f, () =>
+                    timer.Once(0.5f, () =>
                     {
                         if (player != null && player.IsConnected)
                             SyncVanishState(player, true);
-                    });
-                }
-                else if (player._limitedNetworking || player.limitNetworking || player.isInvisible)
-                {
-                    timer.Once(0.2f, () =>
-                    {
-                        if (player != null && player.IsConnected)
-                            SyncVanishState(player, false);
                     });
                 }
             }
@@ -907,15 +991,26 @@ namespace Oxide.Plugins
 
             try
             {
+                _vanishHarmony?.UnpatchAll(_vanishHarmony.Id);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning($"Harmony unpatch warning: {ex.Message}");
+            }
+            finally
+            {
+                _vanishHarmony = null;
+            }
+            try
+            {
                 foreach (BasePlayer player in BasePlayer.activePlayerList)
                 {
                     if (player == null)
                         continue;
 
-                    if (player._limitedNetworking || player.limitNetworking || player.isInvisible)
+                    if (player._limitedNetworking)
                         SyncVanishState(player, false);
 
-                    CuiHelper.DestroyUi(player, VanishBadgeUiName);
                     player.SendNetworkUpdateImmediate();
                 }
             }
@@ -924,6 +1019,7 @@ namespace Oxide.Plugins
                 PrintWarning($"Unload cleanup warning: {ex.Message}");
             }
 
+            _networkHiddenIds.Clear();
             SaveData();
         }
 
@@ -1256,11 +1352,10 @@ namespace Oxide.Plugins
             if (applyFlags != null)
                 applyFlags(target, enabled);
 
-            if (configName == "Vanish")
+            if (configName == "Fly" || configName == "Noclip")
+            {
                 target.SendNetworkUpdateImmediate();
-
-            if (configName == "Fly" || configName == "Noclip" || configName == "Vanish")
-                target.SendNetworkUpdateImmediate();
+            }
 
             SaveData();
 
@@ -1953,7 +2048,8 @@ namespace Oxide.Plugins
             }
 
             List<BasePlayer> players = BasePlayer.activePlayerList
-                .Where(p => p != null && !HasSavedVanishState(p) && !IsVanishEnabled(p))
+                .Where(p => p != null)
+                .Where(p => !IsPlayerMarkedVanished(p))
                 .OrderBy(p => p.displayName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             if (players.Count == 0)
@@ -2480,6 +2576,263 @@ namespace Oxide.Plugins
 
         #endregion
 
+
+        public class VanishVisualState : FacepunchBehaviour
+        {
+            private BasePlayer _player;
+            private Vector3 _originalScale = Vector3.one;
+            private Renderer[] _renderers;
+            private bool[] _rendererStates;
+            private bool _hidden;
+
+            private void Awake()
+            {
+                _player = GetComponent<BasePlayer>();
+                if (_player != null)
+                {
+                    _originalScale = _player.transform.localScale;
+                    _renderers = _player.GetComponentsInChildren<Renderer>(true);
+                    if (_renderers != null)
+                    {
+                        _rendererStates = new bool[_renderers.Length];
+                        for (int i = 0; i < _renderers.Length; i++)
+                            _rendererStates[i] = _renderers[i] != null && _renderers[i].enabled;
+                    }
+                }
+
+                SetHidden(true);
+            }
+
+            public void SetHidden(bool hidden)
+            {
+                _hidden = hidden;
+                if (_hidden)
+                    ApplyHidden();
+                else
+                    Restore();
+            }
+
+            private void LateUpdate()
+            {
+                if (_hidden)
+                    ApplyHidden();
+            }
+
+            private void ApplyHidden()
+            {
+                if (_player == null)
+                    return;
+
+                _player.transform.localScale = Vector3.zero;
+                _player.lastAdminCheatTime = float.MaxValue;
+
+                if (_renderers == null || _rendererStates == null)
+                {
+                    _renderers = _player.GetComponentsInChildren<Renderer>(true);
+                    if (_renderers != null)
+                    {
+                        _rendererStates = new bool[_renderers.Length];
+                        for (int i = 0; i < _renderers.Length; i++)
+                            _rendererStates[i] = _renderers[i] != null && _renderers[i].enabled;
+                    }
+                }
+
+                if (_renderers == null)
+                    return;
+
+                for (int i = 0; i < _renderers.Length; i++)
+                {
+                    if (_renderers[i] != null)
+                        _renderers[i].enabled = false;
+                }
+            }
+
+            private void Restore()
+            {
+                if (_player == null)
+                    return;
+
+                _player.transform.localScale = _originalScale;
+
+                if (_renderers == null || _rendererStates == null)
+                    return;
+
+                for (int i = 0; i < _renderers.Length; i++)
+                {
+                    if (_renderers[i] != null)
+                        _renderers[i].enabled = _rendererStates[i];
+                }
+            }
+
+            private void OnDestroy()
+            {
+                _hidden = false;
+                Restore();
+            }
+        }
+
+        // Resolves the native method of playing by the string name in runtime (and not through nameof/typeof overload
+        // in the compile time) and applies a prefix or postfix from the corresponding Patch_* class to it.
+        // If a method with this name/signature is not found in the current build of the game, just warn
+        // and we skip this particular fix, it does not affect the rest of the patches.
+        private void TryPatchNative(Type targetType, string methodName, Type[] parameterTypes, Type patchClass, bool isPrefix)
+        {
+            try
+            {
+                MethodInfo original = AccessTools.Method(targetType, methodName, parameterTypes);
+                if (original == null)
+                {
+                    PrintWarning($"Harmony: метод {targetType.Name}.{methodName} не найден в этой версии игры — соответствующий vanish-фикс отключён.");
+                    return;
+                }
+
+                MethodInfo patchMethod = AccessTools.Method(patchClass, isPrefix ? "Prefix" : "Postfix");
+                if (patchMethod == null)
+                    return;
+
+                HarmonyMethod harmonyMethod = new HarmonyMethod(patchMethod);
+
+                if (isPrefix)
+                    _vanishHarmony.Patch(original, prefix: harmonyMethod);
+                else
+                    _vanishHarmony.Patch(original, postfix: harmonyMethod);
+            }
+            catch (Exception ex)
+            {
+                PrintWarning($"Harmony: не удалось применить патч {targetType.Name}.{methodName}: {ex.Message}");
+            }
+        }
+
+        private void ApplyVanishHarmonyPatches()
+        {
+            TryPatchNative(typeof(BaseNetworkable), "GetConnectionsWithin",
+                new[] { typeof(Vector3), typeof(float), typeof(bool) },
+                typeof(Patch_GetConnectionsWithin), isPrefix: false);
+
+            TryPatchNative(typeof(BaseEntity), "SignalBroadcast",
+                new[] { typeof(BaseEntity.Signal), typeof(string), typeof(Connection), typeof(string), typeof(float) },
+                typeof(Patch_SignalBroadcast), isPrefix: true);
+
+            TryPatchNative(typeof(EffectNetwork), "Send",
+                new[] { typeof(Effect), typeof(EntityNetworkRange) },
+                typeof(Patch_EffectNetworkSend), isPrefix: true);
+
+            TryPatchNative(typeof(Item), "SetItemOwnership",
+                new[] { typeof(BasePlayer), typeof(Translate.Phrase) },
+                typeof(Patch_SetItemOwnership_Phrase), isPrefix: true);
+
+            TryPatchNative(typeof(Item), "SetItemOwnership",
+                new[] { typeof(BasePlayer), typeof(string) },
+                typeof(Patch_SetItemOwnership_String), isPrefix: true);
+
+            TryPatchNative(typeof(BasePlayer), "Teleport",
+                new[] { typeof(Vector3) },
+                typeof(Patch_TrapTeleport), isPrefix: true);
+        }
+
+        // The standard vanish (limitNetworking + isInvisible + hiding renderers) does not close several
+        // low-level ways in which the game conveys the player's presence to other clients bypassing
+        // a regular network group. The patches below pointwise close these paths through Harmony. The instance itself
+        // Harmony is created and patched/unpatched manually in Init()/Unload() — see the Initialization region.
+        #region Native Network Patches (Vanish)
+
+        // A player hidden through limitNetworking ceases to be a "network neighbor" to himself, therefore
+        // otherwise, the engine will not count him in the list of recipients for sounds/voices next to his own position —
+        // without this patch, the hidden player is effectively stalled while in vanish. The patch returns
+        // its inclusion in the result, if it actually falls within the radius of the request.
+        private static class Patch_GetConnectionsWithin
+        {
+            [HarmonyPostfix]
+            private static void Postfix(ref List<Connection> __result, Vector3 position, float distance)
+            {
+                if (_networkHiddenIds.Count == 0 || __result == null)
+                    return;
+
+                float radiusSqr = distance * distance;
+
+                foreach (BasePlayer hidden in BasePlayer.activePlayerList)
+                {
+                    if (hidden == null || !_networkHiddenIds.Contains(hidden.userID) || hidden.Connection == null)
+                        continue;
+
+                    if ((hidden.transform.position - position).sqrMagnitude > radiusSqr)
+                        continue;
+
+                    __result.RemoveAll(c => c != null && c.userid == hidden.userID);
+                    __result.Add(hidden.Connection);
+                }
+            }
+        }
+
+        // SignalBroadcast sends out game signals (footsteps, landings, etc.) directly via 
+        // source connection, bypassing normal network visibility. If the source is a hidden player, we cancel the entire newsletter.
+        private static class Patch_SignalBroadcast
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(Connection sourceConnection)
+            {
+                if (sourceConnection == null)
+                    return true;
+
+                return !_networkHiddenIds.Contains(sourceConnection.userid);
+            }
+        }
+
+        // Similar for EffectNetwork.Send: footsteps, sound of gunfire, and other Effects with a linked source
+        // are sent to everyone within earshot directly, bypassing the player's standard network visibility.
+        private static class Patch_EffectNetworkSend
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(Effect effect)
+            {
+                if (effect == null || effect.source == 0)
+                    return true;
+
+                return !_networkHiddenIds.Contains(effect.source);
+            }
+        }
+
+        // SetItemOwnership triggers client popups to "pick up an item" from everyone who sees the container.
+        // A hidden player should not physically produce this side effect when interacting with things.
+        // Both overloads (with Translate.Phrase and with the usual reason string) are closed with the same
+        // checking to avoid duplicating logic.
+        private static bool ShouldBlockOwnershipChange(BasePlayer owner)
+        {
+            return owner != null && _networkHiddenIds.Contains(owner.userID);
+        }
+
+        private static class Patch_SetItemOwnership_Phrase
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(BasePlayer player) => !ShouldBlockOwnershipChange(player);
+        }
+
+        private static class Patch_SetItemOwnership_String
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(BasePlayer player) => !ShouldBlockOwnershipChange(player);
+        }
+
+        // Traps (shock panels, etc.) teleport the victim directly through the BasePlayer.Teleport, bypassing
+        // TeleportPlayer from this plugin. A regular Teleport forces a complete network upgrade — for
+        // For a hidden player, this may briefly "light up" him to others. Instead, just move
+        // position on the server and synchronize it addressedly, only on the client of the player himself.
+        private static class Patch_TrapTeleport
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(BasePlayer __instance, Vector3 position)
+            {
+                if (__instance == null || !_networkHiddenIds.Contains(__instance.userID))
+                    return true;
+
+                __instance.MovePosition(position, false);
+                __instance.ClientRPC(RpcTarget.Player("ForcePositionTo", __instance), position);
+                return false;
+            }
+        }
+
+        #endregion
+
         #region Hooks
 
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
@@ -2509,7 +2862,7 @@ namespace Oxide.Plugins
 
             if (state.Vanish && !IsVanishEnabled(player))
                 SyncVanishState(player, true);
-            else if (!state.Vanish && (IsVanishEnabled(player) || player.limitNetworking || player.isInvisible))
+            else if (!state.Vanish && IsVanishEnabled(player))
                 SyncVanishState(player, false);
 
             return null;
@@ -2540,6 +2893,16 @@ namespace Oxide.Plugins
 
             if (!HasMaintenanceBypass(player))
                 NextTick(() => player.Kick(_config.Settings.MaintenanceMessage));
+        }
+
+        // Sudden shifts of position from traps/RPC (see Patch_TrapTeleport) and the very nature of vanish easily
+        // false trigger engine anti-cheat. We do not punish hidden players for this.
+        private object OnPlayerViolation(BasePlayer player)
+        {
+            if (player != null && _networkHiddenIds.Contains(player.userID))
+                return false;
+
+            return null;
         }
 
         #endregion
