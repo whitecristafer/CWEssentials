@@ -7,14 +7,15 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Game.Rust.Cui;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.3.6", ResourceId = 258869)]
+    [Info("CWEssentials", "whitecristafer", "1.3.7", ResourceId = 258869)]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.3.6";
+        private const string PluginVersion = "1.3.7";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -26,6 +27,7 @@ namespace Oxide.Plugins
         private PluginConfig _config;
         private StoredData _data;
         private Timer _maintenanceTimer;
+        private const string VanishBadgeUiName = "CWEssentials.VanishBadge";
 
         #region Configuration
 
@@ -54,6 +56,24 @@ namespace Oxide.Plugins
 
             [JsonProperty("PluginIcon")]
             public ulong PluginIcon = DefaultPluginIcon;
+
+            [JsonProperty("Show Vanish Badge")]
+            public bool ShowVanishBadge = true;
+
+            [JsonProperty("Vanish Badge Text")]
+            public string VanishBadgeText = "👻 VANISH";
+
+            [JsonProperty("Vanish Badge Color")]
+            public string VanishBadgeColor = "0.95 0.85 1 0.95";
+
+            [JsonProperty("Vanish Badge Background")]
+            public string VanishBadgeBackground = "0 0 0 0.35";
+
+            [JsonProperty("Vanish Badge Anchor Min")]
+            public string VanishBadgeAnchorMin = "0.40 0.92";
+
+            [JsonProperty("Vanish Badge Anchor Max")]
+            public string VanishBadgeAnchorMax = "0.60 0.97";
 
             [JsonProperty("MessageSize")]
             public int MessageSize = 14;
@@ -317,10 +337,10 @@ namespace Oxide.Plugins
                 ["NoclipOff"] = "Noclip mode disabled.",
                 ["NoclipOnOther"] = "Noclip mode enabled for {0}.",
                 ["NoclipOffOther"] = "Noclip mode disabled for {0}.",
-                ["VanishOn"] = "Vanish mode enabled.",
-                ["VanishOff"] = "Vanish mode disabled.",
-                ["VanishOnOther"] = "Vanish mode enabled for {0}.",
-                ["VanishOffOther"] = "Vanish mode disabled for {0}.",
+                ["VanishOn"] = "👻 Vanish mode enabled.",
+                ["VanishOff"] = "👻 Vanish mode disabled.",
+                ["VanishOnOther"] = "👻 Vanish mode enabled for {0}.",
+                ["VanishOffOther"] = "👻 Vanish mode disabled for {0}.",
                 ["SpeedSet"] = "Speed set to {0}.",
                 ["SpeedSetOther"] = "Speed set to {0} for {1}.",
                 ["SpeedReset"] = "Speed reset to normal.",
@@ -507,6 +527,53 @@ namespace Oxide.Plugins
             return player != null && player._limitedNetworking;
         }
 
+        private bool HasSavedVanishState(BasePlayer player)
+        {
+            if (player == null || _data?.PlayerStates == null)
+                return false;
+
+            return _data.PlayerStates.TryGetValue(player.userID, out PlayerState state) && state?.Vanish == true;
+        }
+
+        private void UpdateVanishBadge(BasePlayer player, bool enabled)
+        {
+            if (player == null)
+                return;
+
+            CuiHelper.DestroyUi(player, VanishBadgeUiName);
+
+            if (!enabled || _config?.Settings?.ShowVanishBadge != true)
+                return;
+
+            string text = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeText) ? "👻 VANISH" : _config.Settings.VanishBadgeText;
+            string background = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeBackground) ? "0 0 0 0.35" : _config.Settings.VanishBadgeBackground;
+            string color = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeColor) ? "0.95 0.85 1 0.95" : _config.Settings.VanishBadgeColor;
+            string anchorMin = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeAnchorMin) ? "0.40 0.92" : _config.Settings.VanishBadgeAnchorMin;
+            string anchorMax = string.IsNullOrWhiteSpace(_config.Settings.VanishBadgeAnchorMax) ? "0.60 0.97" : _config.Settings.VanishBadgeAnchorMax;
+
+            var container = new CuiElementContainer();
+            var panel = container.Add(new CuiPanel
+            {
+                Image = { Color = background },
+                RectTransform = { AnchorMin = anchorMin, AnchorMax = anchorMax },
+                CursorEnabled = false
+            }, "Hud", VanishBadgeUiName);
+
+            container.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = text,
+                    FontSize = 14,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = color
+                },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" }
+            }, panel);
+
+            CuiHelper.AddUi(player, container);
+        }
+
         private void SyncVanishState(BasePlayer player, bool enabled)
         {
             if (player == null)
@@ -514,30 +581,41 @@ namespace Oxide.Plugins
 
             if (enabled)
             {
-                if (player._limitedNetworking)
+                if (player._limitedNetworking && player.limitNetworking)
+                {
+                    UpdateVanishBadge(player, true);
                     return;
+                }
 
                 BaseEntity.Query.Server.RemovePlayer(player);
 
                 player._limitedNetworking = true;
                 player.syncPosition = false;
                 player.limitNetworking = true;
+                player.isInvisible = true;
                 player.DisablePlayerCollider();
+                player.UpdateNetworkGroup();
                 player.SendNetworkUpdateImmediate();
+                UpdateVanishBadge(player, true);
                 return;
             }
 
-            if (!player._limitedNetworking && !player.limitNetworking)
+            if (!player._limitedNetworking && !player.limitNetworking && !player.isInvisible)
+            {
+                UpdateVanishBadge(player, false);
                 return;
+            }
 
             player._limitedNetworking = false;
             player.syncPosition = true;
             player.limitNetworking = false;
+            player.isInvisible = false;
 
             BaseEntity.Query.Server.AddPlayer(player);
             player.EnablePlayerCollider();
             player.UpdateNetworkGroup();
             player.SendNetworkUpdateImmediate();
+            UpdateVanishBadge(player, false);
         }
 
         private string FormatChatMessage(string message, string colorKey = "Info", bool useTitleSize = false)
@@ -791,7 +869,26 @@ namespace Oxide.Plugins
                 return;
 
             if (_data.PlayerStates.TryGetValue(player.userID, out PlayerState state))
+            {
                 state.MovementSynced = false;
+
+                if (state.Vanish)
+                {
+                    timer.Once(0.2f, () =>
+                    {
+                        if (player != null && player.IsConnected)
+                            SyncVanishState(player, true);
+                    });
+                }
+                else if (player._limitedNetworking || player.limitNetworking || player.isInvisible)
+                {
+                    timer.Once(0.2f, () =>
+                    {
+                        if (player != null && player.IsConnected)
+                            SyncVanishState(player, false);
+                    });
+                }
+            }
 
             if (IsPluginEnabled() && _config?.Maintenance?.Enabled == true)
             {
@@ -815,9 +912,10 @@ namespace Oxide.Plugins
                     if (player == null)
                         continue;
 
-                    if (player._limitedNetworking)
+                    if (player._limitedNetworking || player.limitNetworking || player.isInvisible)
                         SyncVanishState(player, false);
 
+                    CuiHelper.DestroyUi(player, VanishBadgeUiName);
                     player.SendNetworkUpdateImmediate();
                 }
             }
@@ -1854,7 +1952,10 @@ namespace Oxide.Plugins
                 return;
             }
 
-            List<BasePlayer> players = BasePlayer.activePlayerList.Where(p => p != null).OrderBy(p => p.displayName, StringComparer.OrdinalIgnoreCase).ToList();
+            List<BasePlayer> players = BasePlayer.activePlayerList
+                .Where(p => p != null && !HasSavedVanishState(p) && !IsVanishEnabled(p))
+                .OrderBy(p => p.displayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
             if (players.Count == 0)
             {
                 Reply(context, Lang("ListHeader", context.UserId, 0), "Highlight", true);
@@ -2408,7 +2509,7 @@ namespace Oxide.Plugins
 
             if (state.Vanish && !IsVanishEnabled(player))
                 SyncVanishState(player, true);
-            else if (!state.Vanish && IsVanishEnabled(player))
+            else if (!state.Vanish && (IsVanishEnabled(player) || player.limitNetworking || player.isInvisible))
                 SyncVanishState(player, false);
 
             return null;
