@@ -1,4 +1,3 @@
-
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -12,11 +11,10 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.2.4-VULNERABLE")]
-    [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
+    [Info("CWEssentials", "whitecristafer", "1.3.6")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.2.4-VULNERABLE";
+        private const string PluginVersion = "1.3.6";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -117,6 +115,8 @@ namespace Oxide.Plugins
             [JsonProperty("Help")] public CommandEntry Help = new CommandEntry();
             [JsonProperty("Reload")] public CommandEntry Reload = new CommandEntry();
             [JsonProperty("Version")] public CommandEntry Version = new CommandEntry();
+            [JsonProperty("PlayerInfo")] public CommandEntry PlayerInfo = new CommandEntry();
+            [JsonProperty("PlayerInfoAll")] public CommandEntry PlayerInfoAll = new CommandEntry();
         }
 
         private class CommandEntry
@@ -361,7 +361,10 @@ namespace Oxide.Plugins
                 ["ReloadSuccess"] = "CWEssentials reloaded successfully.",
                 ["ReloadFailed"] = "Reload failed. Check the server logs.",
                 ["VersionMessage"] = "CWEssentials v{0} by whitecristafer.",
-                ["UnknownCommand"] = "Unknown command. Use /cwe help."
+                ["UnknownCommand"] = "Unknown command. Use /cwe help.",
+                ["PlayerInfoBriefHeader"] = "--- Player Info: {0} ---",
+                ["PlayerInfoDetailedHeader"] = "=== Comprehensive Diagnostics: {0} ===",
+                ["MustSpecifyPlayer"] = "You must specify a player name or SteamID when executing from server console."
             }, this, "en");
         }
 
@@ -378,7 +381,8 @@ namespace Oxide.Plugins
             {
                 "maintenance", "maintenance.bypass", "god", "fly", "noclip", "vanish", "speed",
                 "tp", "tphere", "tploc", "heal", "eat", "clear", "give", "repair", "repairall",
-                "kick", "list", "ping", "time", "time.set", "rules", "help", "reload", "version"
+                "kick", "list", "ping", "time", "time.set", "rules", "help", "reload", "version",
+                "playerinfo", "playerinfoall"
             };
 
             foreach (string perm in perms)
@@ -387,12 +391,11 @@ namespace Oxide.Plugins
 
         private bool IsServerConsole(CommandContext context)
         {
-            return context.Player == null && (context.Arg == null || context.Arg.Connection == null);
+            return context.Arg != null && context.Arg.Connection == null;
         }
 
         private bool HasPermission(BasePlayer player, string permissionName)
         {
-            // For internal calls, null is never considered a "permission".
             if (player == null)
                 return false;
 
@@ -404,10 +407,14 @@ namespace Oxide.Plugins
 
         private bool HasPermission(CommandContext context, string permissionName)
         {
-            // Real Server Console/RCON
+            if (IsServerConsole(context))
+            {
+                return true;
+            }
+
             if (context.Player == null)
             {
-                return context.Arg == null || context.Arg.Connection == null;
+                return false;
             }
 
             return HasPermission(context.Player, permissionName);
@@ -755,7 +762,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled(commandName))
                 return false;
 
-            return context.Player == null || HasPermission(context.Player, permissionName);
+            return HasPermission(context, permissionName);
         }
 
         #endregion
@@ -1114,7 +1121,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled(configName))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + permissionSuffix))
+            if (!HasPermission(context, PermissionBase + permissionSuffix))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1292,7 +1299,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled(here ? "TPHere" : "TP"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + (here ? "tphere" : "tp")))
+            if (!HasPermission(context, PermissionBase + (here ? "tphere" : "tp")))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1403,10 +1410,7 @@ namespace Oxide.Plugins
 
             Vector3 position = new Vector3(x, y, z);
             TeleportPlayer(target, position);
-            if (target == context.Player)
-                Reply(context, Lang("TeleportToLoc", context.UserId, position.ToString()), "Success");
-            else
-                Reply(context, Lang("TeleportToLoc", context.UserId, position.ToString()), "Success");
+            Reply(context, Lang("TeleportToLoc", context.UserId, position.ToString()), "Success");
 
             LogToConsole($"{context.Name} teleported {target.displayName} to {position}");
         }
@@ -1522,12 +1526,24 @@ namespace Oxide.Plugins
         [ConsoleCommand("cwe.help")]
         private void CCmdCweHelp(ConsoleSystem.Arg arg) => HandleHelp(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
+        [ChatCommand("playerinfo")]
+        private void CmdPlayerInfo(BasePlayer player, string cmd, string[] args) => HandlePlayerInfo(new CommandContext(this, player), args, false);
+
+        [ConsoleCommand("playerinfo")]
+        private void CCmdPlayerInfo(ConsoleSystem.Arg arg) => HandlePlayerInfo(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), false);
+
+        [ChatCommand("playerinfoall")]
+        private void CmdPlayerInfoAll(BasePlayer player, string cmd, string[] args) => HandlePlayerInfo(new CommandContext(this, player), args, true);
+
+        [ConsoleCommand("playerinfoall")]
+        private void CCmdPlayerInfoAll(ConsoleSystem.Arg arg) => HandlePlayerInfo(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), true);
+
         private void HandleHealth(CommandContext context, string[] args, string mode)
         {
             if (!IsPluginEnabled() || !IsCommandEnabled(mode == "heal" ? "Heal" : "Eat"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + mode))
+            if (!HasPermission(context, PermissionBase + mode))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1921,7 +1937,6 @@ namespace Oxide.Plugins
             LogToConsole($"{context.Name} checked the ping for {target.displayName}: {ping} ms");
         }
 
-        
         private void HandleTime(CommandContext context, bool setDay = false, bool setNight = false)
         {
             bool isSetCommand = setDay || setNight;
@@ -1929,14 +1944,11 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !(isSetCommand ? IsCommandEnabled("DayNight") : IsCommandEnabled("Time")))
                 return;
 
-            if (context.Player != null)
+            string permissionName = isSetCommand ? PermissionBase + "time.set" : PermissionBase + "time";
+            if (!HasPermission(context, permissionName))
             {
-                string permissionName = isSetCommand ? PermissionBase + "time.set" : PermissionBase + "time";
-                if (!HasPermission(context.Player, permissionName))
-                {
-                    Reply(context, Lang("NoPermission", context.UserId), "Error");
-                    return;
-                }
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
             }
 
             if (isSetCommand)
@@ -2090,7 +2102,6 @@ namespace Oxide.Plugins
                 Reply(context, Lang("HelpLine", context.UserId, entries[i].Command, entries[i].Description), "Info");
         }
 
-        
         private List<HelpEntry> BuildHelpEntries(CommandContext context)
         {
             var items = new List<HelpEntry>
@@ -2119,6 +2130,8 @@ namespace Oxide.Plugins
                 new HelpEntry("day", "Set the world time to day.", "DayNight"),
                 new HelpEntry("night", "Set the world time to night.", "DayNight"),
                 new HelpEntry("rules", "Show server rules from file.", "Rules"),
+                new HelpEntry("playerinfo", "Show brief information about a player.", "PlayerInfo"),
+                new HelpEntry("playerinfoall", "Show diagnostic/engine information about a player.", "PlayerInfoAll"),
                 new HelpEntry("cwe help", "Show this help page.", "Help"),
                 new HelpEntry("cwe reload", "Reload the plugin configuration and data.", "Reload"),
                 new HelpEntry("cwe version", "Show the plugin version.", "Version")
@@ -2189,6 +2202,143 @@ namespace Oxide.Plugins
             Reply(context, Lang("VersionMessage", context.UserId, PluginVersion), "Info");
         }
 
+        private void HandlePlayerInfo(CommandContext context, string[] args, bool detailed)
+        {
+            string cmdName = detailed ? "PlayerInfoAll" : "PlayerInfo";
+            string permSuffix = detailed ? "playerinfoall" : "playerinfo";
+
+            if (!IsPluginEnabled() || !IsCommandEnabled(cmdName))
+                return;
+
+            if (!HasPermission(context, PermissionBase + permSuffix))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            BasePlayer target = context.Player;
+
+            if (args != null && args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player) && possibleTarget != context.Player)
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+                    target = possibleTarget;
+                }
+                else
+                {
+                    Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                    return;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("MustSpecifyPlayer", context.UserId), "Error");
+                return;
+            }
+
+            PlayerState state = GetState(target);
+            string pingStr = "0";
+            string ipStr = "Local/RCON";
+
+            if (target.net?.connection != null)
+            {
+                ipStr = target.net.connection.ipaddress;
+                try
+                {
+                    pingStr = Network.Net.sv.GetAveragePing(target.net.connection).ToString();
+                }
+                catch
+                {
+                    pingStr = "N/A";
+                }
+            }
+
+            string activeItemStr = target.GetActiveItem()?.info?.shortname ?? "None";
+
+            // Получаем Oxide группы и пермишены игрока
+            string[] userGroups = permission.GetUserGroups(target.UserIDString) ?? Array.Empty<string>();
+            string groupsStr = userGroups.Length > 0 ? string.Join(", ", userGroups) : "None";
+
+            string[] userPerms = permission.GetUserPermissions(target.UserIDString) ?? Array.Empty<string>();
+            string permsStr = userPerms.Length > 0 ? string.Join(", ", userPerms) : "None";
+
+            if (!detailed)
+            {
+                // Краткая сводка (playerinfo)
+                string briefHeader = Lang("PlayerInfoBriefHeader", context.UserId, target.displayName);
+                
+                string message = $"{briefHeader}\n" +
+                                $"• SteamID (OwnerID): {target.UserIDString} | IsAdmin: {(target.IsAdmin ? "YES" : "NO")}\n" +
+                                $"• IP: {ipStr} | Ping: {pingStr}ms\n" +
+                                $"• Position: X: {target.transform.position.x:F2}, Y: {target.transform.position.y:F2}, Z: {target.transform.position.z:F2}\n" +
+                                $"• Health: {target.health:F1}/{target.MaxHealth():F1} | Active: {activeItemStr}\n" +
+                                $"• Oxide Groups: {groupsStr}\n" +
+                                $"• CWE States: God: {(state?.God == true ? "ON" : "OFF")}, Vanish: {(state?.Vanish == true ? "ON" : "OFF")}, Fly: {(state?.Fly == true ? "ON" : "OFF")}, Noclip: {(state?.Noclip == true ? "ON" : "OFF")}, Speed: {state?.Speed ?? 1f:F1}x";
+
+                Reply(context, message, "Info");
+            }
+            else
+            {
+                // Подробная сводка (playerinfoall)
+                string detailedHeader = Lang("PlayerInfoDetailedHeader", context.UserId, target.displayName);
+
+                string teamIdStr = "None";
+                if (RelationshipManager.ServerInstance != null)
+                {
+                    var team = RelationshipManager.ServerInstance.FindPlayersTeam(target.userID);
+                    if (team != null)
+                        teamIdStr = team.teamID.ToString();
+                }
+
+                float cal = target.metabolism?.calories?.value ?? 0f;
+                float maxCal = target.metabolism?.calories?.max ?? 0f;
+                float hyd = target.metabolism?.hydration?.value ?? 0f;
+                float maxHyd = target.metabolism?.hydration?.max ?? 0f;
+                float temp = target.metabolism?.temperature?.value ?? 0f;
+                float rad = target.metabolism?.radiation_poison?.value ?? 0f;
+
+                int mainCount = target.inventory?.containerMain?.itemList?.Count ?? 0;
+                int beltCount = target.inventory?.containerBelt?.itemList?.Count ?? 0;
+                int wearCount = target.inventory?.containerWear?.itemList?.Count ?? 0;
+
+                Vector3 rot = target.eyes?.rotation.eulerAngles ?? Vector3.zero;
+
+                string message = $"{detailedHeader}\n" +
+                                $"<color=#ffaa00>[Identity, Connection & Oxide]</color>\n" +
+                                $"  - SteamID (OwnerID): {target.UserIDString}\n" +
+                                $"  - IP Address: {ipStr} | Avg Ping: {pingStr} ms\n" +
+                                $"  - Auth Level: {target.net?.connection?.authLevel ?? 0} (IsAdmin: {target.IsAdmin})\n" +
+                                $"  - Oxide Groups: {groupsStr}\n" +
+                                $"  - Oxide Perms: {permsStr}\n" +
+                                $"<color=#ffaa00>[Game States]</color>\n" +
+                                $"  - Alive: {target.IsAlive()} | Sleeping: {target.IsSleeping()} | Wounded: {target.IsWounded()}\n" +
+                                $"  - Building Blocked: {target.IsBuildingBlocked()} | Team ID: {teamIdStr}\n" +
+                                $"<color=#ffaa00>[Stats & Metabolism]</color>\n" +
+                                $"  - Health: {target.health:F1} / {target.MaxHealth():F1}\n" +
+                                $"  - Calories: {cal:F0} / {maxCal:F0} | Hydration: {hyd:F0} / {maxHyd:F0}\n" +
+                                $"  - Temperature: {temp:F1}°C | Radiation: {rad:F1}\n" +
+                                $"<color=#ffaa00>[Inventory & Loadout]</color>\n" +
+                                $"  - Container Main: {mainCount} items | Belt: {beltCount} items | Wear: {wearCount} items\n" +
+                                $"  - Active Item: {activeItemStr}\n" +
+                                $"<color=#ffaa00>[Location]</color>\n" +
+                                $"  - Position: X: {target.transform.position.x:F4}, Y: {target.transform.position.y:F4}, Z: {target.transform.position.z:F4}\n" +
+                                $"  - Rotation: Pitch: {rot.x:F2}, Yaw: {rot.y:F2}, Roll: {rot.z:F2}\n" +
+                                $"<color=#ffaa00>[CWE Essentials States]</color>\n" +
+                                $"  - God Mode: {(state?.God == true ? "ON" : "OFF")} | Vanish: {(state?.Vanish == true ? "ON" : "OFF")}\n" +
+                                $"  - Flight Mode: {(state?.Fly == true ? "ON" : "OFF")} | Noclip: {(state?.Noclip == true ? "ON" : "OFF")}\n" +
+                                $"  - Speed Multiplier: {state?.Speed ?? 1f:F1}x | Movement Synced: {(state?.MovementSynced == true ? "ON" : "OFF")}";
+
+                Reply(context, message, "Info");
+            }
+        }
+
         private string GetHelpPermissionName(string configName)
         {
             if (string.IsNullOrEmpty(configName))
@@ -2204,6 +2354,10 @@ namespace Oxide.Plugins
                     return PermissionBase + "reload";
                 case "Version":
                     return PermissionBase + "version";
+                case "PlayerInfo":
+                    return PermissionBase + "playerinfo";
+                case "PlayerInfoAll":
+                    return PermissionBase + "playerinfoall";
                 default:
                     return PermissionBase + configName.ToLowerInvariant();
             }
@@ -2249,11 +2403,6 @@ namespace Oxide.Plugins
             if (state == null)
                 return null;
 
-            if (state.God)
-            {
-                // God mode is enforced through the damage hook.
-            }
-
             if (state.Fly || state.Noclip)
                 SyncMovementMode(player, state);
 
@@ -2261,9 +2410,6 @@ namespace Oxide.Plugins
                 SyncVanishState(player, true);
             else if (!state.Vanish && IsVanishEnabled(player))
                 SyncVanishState(player, false);
-
-            // Movement speed is intentionally not written directly because the current Rust API does not expose
-            // writable walk/run speed members on BasePlayer.
 
             return null;
         }
