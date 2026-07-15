@@ -11,10 +11,10 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.3.6-vulnerability")]
+    [Info("CWEssentials", "whitecristafer", "1.3.6.1-vulnerability", ResourceId = 123456)]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.3.6-vulnerability";
+        private const string PluginVersion = "1.3.6.1-vulnerability";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -391,7 +391,7 @@ namespace Oxide.Plugins
 
         private bool IsServerConsole(CommandContext context)
         {
-            return context.Arg != null && context.Arg.Connection == null;
+            return context.Arg != null && context.Arg.Connection == null && context.Player == null;
         }
 
         private bool HasPermission(BasePlayer player, string permissionName)
