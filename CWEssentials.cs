@@ -12,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.1.1")]
+    [Info("CWEssentials", "whitecristafer", "1.1.2")]
     [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.1.1";
+        private const string PluginVersion = "1.1.2";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -416,15 +416,18 @@ namespace Oxide.Plugins
 
         private bool IsCommandEnabled(string commandName)
         {
-            if (_config?.Commands == null)
+            if (_config?.Commands == null || string.IsNullOrWhiteSpace(commandName))
                 return false;
 
-            PropertyInfo property = typeof(CommandsConfig).GetProperty(commandName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-            if (property == null)
-                return false;
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase;
 
-            if (property.GetValue(_config.Commands) is CommandEntry entry)
-                return entry.Enabled;
+            PropertyInfo property = typeof(CommandsConfig).GetProperty(commandName, flags);
+            if (property != null && property.GetValue(_config.Commands) is CommandEntry propertyEntry)
+                return propertyEntry.Enabled;
+
+            FieldInfo field = typeof(CommandsConfig).GetField(commandName, flags);
+            if (field != null && field.GetValue(_config.Commands) is CommandEntry fieldEntry)
+                return fieldEntry.Enabled;
 
             return false;
         }
