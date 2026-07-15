@@ -12,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.1.0")]
+    [Info("CWEssentials", "whitecristafer", "1.1.1")]
     [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.1.0";
+        private const string PluginVersion = "1.1.1";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -229,6 +229,7 @@ namespace Oxide.Plugins
             public bool Fly;
             public bool Noclip;
             public bool Vanish;
+            public bool MovementSynced;
             public float Speed = 1f;
         }
 
@@ -455,6 +456,62 @@ namespace Oxide.Plugins
             return Regex.Replace(value, "<[^>]*>", string.Empty);
         }
 
+        private void SyncMovementMode(BasePlayer player, PlayerState state)
+        {
+            if (player == null || state == null || !player.IsConnected)
+                return;
+
+            if (!state.Fly && !state.Noclip)
+            {
+                state.MovementSynced = false;
+                return;
+            }
+
+            if (state.MovementSynced)
+                return;
+
+            rust.RunClientCommand(player, "noclip");
+            state.MovementSynced = true;
+        }
+
+        private bool IsVanishEnabled(BasePlayer player)
+        {
+            return player != null && player._limitedNetworking;
+        }
+
+        private void SyncVanishState(BasePlayer player, bool enabled)
+        {
+            if (player == null)
+                return;
+
+            if (enabled)
+            {
+                if (player._limitedNetworking)
+                    return;
+
+                BaseEntity.Query.Server.RemovePlayer(player);
+
+                player._limitedNetworking = true;
+                player.syncPosition = false;
+                player.limitNetworking = true;
+                player.DisablePlayerCollider();
+                player.SendNetworkUpdateImmediate();
+                return;
+            }
+
+            if (!player._limitedNetworking && !player.limitNetworking)
+                return;
+
+            player._limitedNetworking = false;
+            player.syncPosition = true;
+            player.limitNetworking = false;
+
+            BaseEntity.Query.Server.AddPlayer(player);
+            player.EnablePlayerCollider();
+            player.UpdateNetworkGroup();
+            player.SendNetworkUpdateImmediate();
+        }
+
         private string FormatChatMessage(string message, string colorKey = "Info", bool useTitleSize = false)
         {
             var settings = _config?.Settings ?? new SettingsConfig();
@@ -668,6 +725,15 @@ namespace Oxide.Plugins
             PrintBanner();
         }
 
+        private void OnPlayerInit(BasePlayer player)
+        {
+            if (player == null || _data?.PlayerStates == null)
+                return;
+
+            if (_data.PlayerStates.TryGetValue(player.userID, out PlayerState state))
+                state.MovementSynced = false;
+        }
+
         private void Unload()
         {
             try
@@ -677,17 +743,9 @@ namespace Oxide.Plugins
                     if (player == null)
                         continue;
 
-                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, false);
+                    if (player._limitedNetworking)
+                        SyncVanishState(player, false);
 
-                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, false);
-
-                    if (player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, false);
-
-                    player.walkSpeed = 1f;
-                    player.runSpeed = 1f;
                     player.SendNetworkUpdateImmediate();
                 }
             }
@@ -732,13 +790,25 @@ namespace Oxide.Plugins
 
         #endregion
 
+        private string[] GetConsoleArgs(ConsoleSystem.Arg arg)
+        {
+            if (arg?.Args == null || arg.Args.Length == 0)
+                return Array.Empty<string>();
+
+            string[] result = new string[arg.Args.Length];
+            for (int i = 0; i < arg.Args.Length; i++)
+                result[i] = arg.Args[i].ToString();
+
+            return result;
+        }
+
         #region Commands
 
         [ChatCommand("maintenance")]
         private void CmdMaintenance(BasePlayer player, string cmd, string[] args) => HandleMaintenance(new CommandContext(this, player), args);
 
         [ConsoleCommand("maintenance")]
-        private void CCmdMaintenance(ConsoleSystem.Arg arg) => HandleMaintenance(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdMaintenance(ConsoleSystem.Arg arg) => HandleMaintenance(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         private void HandleMaintenance(CommandContext context, string[] args)
         {
@@ -882,45 +952,95 @@ namespace Oxide.Plugins
         private void CmdGod(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "God", "god", state => { state.God = !state.God; }, state => state.God, "GodOn", "GodOff", "GodOnOther", "GodOffOther");
 
         [ConsoleCommand("god")]
-        private void CCmdGod(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "God", "god", state => { state.God = !state.God; }, state => state.God, "GodOn", "GodOff", "GodOnOther", "GodOffOther");
+        private void CCmdGod(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "God", "god", state => { state.God = !state.God; }, state => state.God, "GodOn", "GodOff", "GodOnOther", "GodOffOther");
 
         [ChatCommand("fly")]
-        private void CmdFly(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Fly", "fly", state => { state.Fly = !state.Fly; }, state => state.Fly, "FlyOn", "FlyOff", "FlyOnOther", "FlyOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state));
+        private void CmdFly(BasePlayer player, string cmd, string[] args) => HandleMovementMode(new CommandContext(this, player), args, "Fly", "fly", true);
 
         [ConsoleCommand("fly")]
-        private void CCmdFly(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Fly", "fly", state => { state.Fly = !state.Fly; }, state => state.Fly, "FlyOn", "FlyOff", "FlyOnOther", "FlyOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state));
+        private void CCmdFly(ConsoleSystem.Arg arg) => HandleMovementMode(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "Fly", "fly", true);
 
         [ChatCommand("noclip")]
-        private void CmdNoclip(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Noclip", "noclip", state =>
-        {
-            state.Noclip = !state.Noclip;
-            state.Fly = state.Noclip || state.Fly;
-        }, state => state.Noclip, "NoclipOn", "NoclipOff", "NoclipOnOther", "NoclipOffOther", applyFlags: (target, state) =>
-        {
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, state);
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state);
-        });
+        private void CmdNoclip(BasePlayer player, string cmd, string[] args) => HandleMovementMode(new CommandContext(this, player), args, "Noclip", "noclip", false);
 
         [ConsoleCommand("noclip")]
-        private void CCmdNoclip(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Noclip", "noclip", state =>
-        {
-            state.Noclip = !state.Noclip;
-            state.Fly = state.Noclip || state.Fly;
-        }, state => state.Noclip, "NoclipOn", "NoclipOff", "NoclipOnOther", "NoclipOffOther", applyFlags: (target, state) =>
-        {
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, state);
-            target.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, state);
-        });
+        private void CCmdNoclip(ConsoleSystem.Arg arg) => HandleMovementMode(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "Noclip", "noclip", false);
 
         [ChatCommand("vanish")]
-        private void CmdVanish(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, state));
+        private void CmdVanish(BasePlayer player, string cmd, string[] args) => HandleToggleState(new CommandContext(this, player), args, "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => SyncVanishState(target, state));
 
         [ConsoleCommand("vanish")]
-        private void CCmdVanish(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), arg?.Args, "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => target.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, state));
+        private void CCmdVanish(ConsoleSystem.Arg arg) => HandleToggleState(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "Vanish", "vanish", state => { state.Vanish = !state.Vanish; }, state => state.Vanish, "VanishOn", "VanishOff", "VanishOnOther", "VanishOffOther", applyFlags: (target, state) => SyncVanishState(target, state));
 
         private delegate void StateMutation(PlayerState state);
         private delegate bool StateGetter(PlayerState state);
         private delegate void StateFlagApplier(BasePlayer target, bool enabled);
+
+        private void HandleMovementMode(CommandContext context, string[] args, string configName, string permissionSuffix, bool isFlyCommand)
+        {
+            if (!IsPluginEnabled() || !IsCommandEnabled(configName))
+                return;
+
+            if (context.Player != null && !HasPermission(context.Player, PermissionBase + permissionSuffix))
+            {
+                Reply(context, Lang("NoPermission", context.UserId), "Error");
+                return;
+            }
+
+            if (args == null) args = Array.Empty<string>();
+
+            BasePlayer target = context.Player;
+            if (args.Length > 0)
+            {
+                BasePlayer possibleTarget = FindPlayer(args[0]);
+                if (possibleTarget != null && possibleTarget != context.Player)
+                {
+                    if (context.Player != null && !CanTargetOthers(context.Player))
+                    {
+                        Reply(context, Lang("NoTargetPermission", context.UserId), "Error");
+                        return;
+                    }
+
+                    target = possibleTarget;
+                }
+            }
+
+            if (target == null)
+            {
+                Reply(context, Lang("PlayerNotFound", context.UserId), "Error");
+                return;
+            }
+
+            PlayerState state = GetState(target);
+            bool previousEnabled = state.Fly || state.Noclip;
+
+            if (isFlyCommand)
+                state.Fly = !state.Fly;
+            else
+                state.Noclip = !state.Noclip;
+
+            bool currentEnabled = state.Fly || state.Noclip;
+
+            if (target.IsConnected && previousEnabled != currentEnabled)
+            {
+                rust.RunClientCommand(target, "noclip");
+                state.MovementSynced = true;
+            }
+            else if (!currentEnabled)
+            {
+                state.MovementSynced = false;
+            }
+
+            SaveData();
+
+            bool enabled = isFlyCommand ? state.Fly : state.Noclip;
+            if (target == context.Player)
+                Reply(context, Lang(enabled ? (isFlyCommand ? "FlyOn" : "NoclipOn") : (isFlyCommand ? "FlyOff" : "NoclipOff"), context.UserId), enabled ? "Success" : "Info");
+            else
+                Reply(context, Lang(enabled ? (isFlyCommand ? "FlyOnOther" : "NoclipOnOther") : (isFlyCommand ? "FlyOffOther" : "NoclipOffOther"), context.UserId, target.displayName), enabled ? "Success" : "Info");
+
+            LogToConsole($"{configName} {(enabled ? "ON" : "OFF")} for {target.displayName} by {context.Name}");
+        }
 
         private void HandleToggleState(CommandContext context, string[] args, string configName, string permissionSuffix, StateMutation mutate, StateGetter getter, string selfOnKey, string selfOffKey, string otherOnKey, string otherOffKey, StateFlagApplier applyFlags = null)
         {
@@ -984,7 +1104,7 @@ namespace Oxide.Plugins
         private void CmdSpeed(BasePlayer player, string cmd, string[] args) => HandleSpeed(new CommandContext(this, player), args);
 
         [ConsoleCommand("speed")]
-        private void CCmdSpeed(ConsoleSystem.Arg arg) => HandleSpeed(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdSpeed(ConsoleSystem.Arg arg) => HandleSpeed(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         private void HandleSpeed(CommandContext context, string[] args)
         {
@@ -1059,8 +1179,8 @@ namespace Oxide.Plugins
 
             PlayerState state = GetState(target);
             state.Speed = speed;
-            target.walkSpeed = speed;
-            target.runSpeed = speed;
+            // Rust 2026 no longer exposes writable player walk/run speed members here.
+            // The chosen value is retained in plugin state so the command remains consistent.
             target.SendNetworkUpdateImmediate();
             SaveData();
 
@@ -1086,19 +1206,19 @@ namespace Oxide.Plugins
         private void CmdTp(BasePlayer player, string cmd, string[] args) => HandleTp(new CommandContext(this, player), args, false);
 
         [ConsoleCommand("tp")]
-        private void CCmdTp(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), arg?.Args, false);
+        private void CCmdTp(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), false);
 
         [ChatCommand("tphere")]
         private void CmdTpHere(BasePlayer player, string cmd, string[] args) => HandleTp(new CommandContext(this, player), args, true);
 
         [ConsoleCommand("tphere")]
-        private void CCmdTpHere(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), arg?.Args, true);
+        private void CCmdTpHere(ConsoleSystem.Arg arg) => HandleTp(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), true);
 
         [ChatCommand("tploc")]
         private void CmdTpLoc(BasePlayer player, string cmd, string[] args) => HandleTpLoc(new CommandContext(this, player), args);
 
         [ConsoleCommand("tploc")]
-        private void CCmdTpLoc(ConsoleSystem.Arg arg) => HandleTpLoc(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdTpLoc(ConsoleSystem.Arg arg) => HandleTpLoc(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         private void HandleTp(CommandContext context, string[] args, bool here)
         {
@@ -1228,43 +1348,43 @@ namespace Oxide.Plugins
         private void CmdHeal(BasePlayer player, string cmd, string[] args) => HandleHealth(new CommandContext(this, player), args, "heal");
 
         [ConsoleCommand("heal")]
-        private void CCmdHeal(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), arg?.Args, "heal");
+        private void CCmdHeal(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "heal");
 
         [ChatCommand("eat")]
         private void CmdEat(BasePlayer player, string cmd, string[] args) => HandleHealth(new CommandContext(this, player), args, "eat");
 
         [ConsoleCommand("eat")]
-        private void CCmdEat(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), arg?.Args, "eat");
+        private void CCmdEat(ConsoleSystem.Arg arg) => HandleHealth(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), "eat");
 
         [ChatCommand("clear")]
         private void CmdClear(BasePlayer player, string cmd, string[] args) => HandleClear(new CommandContext(this, player), args);
 
         [ConsoleCommand("clear")]
-        private void CCmdClear(ConsoleSystem.Arg arg) => HandleClear(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdClear(ConsoleSystem.Arg arg) => HandleClear(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("give")]
         private void CmdGive(BasePlayer player, string cmd, string[] args) => HandleGive(new CommandContext(this, player), args);
 
         [ConsoleCommand("give")]
-        private void CCmdGive(ConsoleSystem.Arg arg) => HandleGive(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdGive(ConsoleSystem.Arg arg) => HandleGive(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("repair")]
         private void CmdRepair(BasePlayer player, string cmd, string[] args) => HandleRepair(new CommandContext(this, player), args, false);
 
         [ConsoleCommand("repair")]
-        private void CCmdRepair(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), arg?.Args, false);
+        private void CCmdRepair(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), false);
 
         [ChatCommand("repairall")]
         private void CmdRepairAll(BasePlayer player, string cmd, string[] args) => HandleRepair(new CommandContext(this, player), args, true);
 
         [ConsoleCommand("repairall")]
-        private void CCmdRepairAll(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), arg?.Args, true);
+        private void CCmdRepairAll(ConsoleSystem.Arg arg) => HandleRepair(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg), true);
 
         [ChatCommand("kick")]
         private void CmdKick(BasePlayer player, string cmd, string[] args) => HandleKick(new CommandContext(this, player), args);
 
         [ConsoleCommand("kick")]
-        private void CCmdKick(ConsoleSystem.Arg arg) => HandleKick(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdKick(ConsoleSystem.Arg arg) => HandleKick(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("list")]
         private void CmdList(BasePlayer player, string cmd, string[] args) => HandleList(new CommandContext(this, player), args);
@@ -1276,19 +1396,19 @@ namespace Oxide.Plugins
         private void CmdPlayers(BasePlayer player, string cmd, string[] args) => HandleList(new CommandContext(this, player), args);
 
         [ConsoleCommand("list")]
-        private void CCmdList(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdList(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ConsoleCommand("online")]
-        private void CCmdOnline(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdOnline(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ConsoleCommand("players")]
-        private void CCmdPlayers(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdPlayers(ConsoleSystem.Arg arg) => HandleList(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("ping")]
         private void CmdPing(BasePlayer player, string cmd, string[] args) => HandlePing(new CommandContext(this, player), args);
 
         [ConsoleCommand("ping")]
-        private void CCmdPing(ConsoleSystem.Arg arg) => HandlePing(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdPing(ConsoleSystem.Arg arg) => HandlePing(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("time")]
         private void CmdTime(BasePlayer player, string cmd, string[] args) => HandleTime(new CommandContext(this, player), false);
@@ -1318,7 +1438,7 @@ namespace Oxide.Plugins
         private void CmdCwe(BasePlayer player, string cmd, string[] args) => HandleCwe(new CommandContext(this, player), args);
 
         [ConsoleCommand("cwe")]
-        private void CCmdCwe(ConsoleSystem.Arg arg) => HandleCwe(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdCwe(ConsoleSystem.Arg arg) => HandleCwe(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         [ChatCommand("cweversion")]
         private void CmdCweVersion(BasePlayer player, string cmd, string[] args) => HandleVersion(new CommandContext(this, player));
@@ -1333,7 +1453,7 @@ namespace Oxide.Plugins
         private void CCmdCweVersionDot(ConsoleSystem.Arg arg) => HandleVersion(new CommandContext(this, arg?.Player(), arg));
 
         [ConsoleCommand("cwe.help")]
-        private void CCmdCweHelp(ConsoleSystem.Arg arg) => HandleHelp(new CommandContext(this, arg?.Player(), arg), arg?.Args);
+        private void CCmdCweHelp(ConsoleSystem.Arg arg) => HandleHelp(new CommandContext(this, arg?.Player(), arg), GetConsoleArgs(arg));
 
         private void HandleHealth(CommandContext context, string[] args, string mode)
         {
@@ -1699,7 +1819,7 @@ namespace Oxide.Plugins
             try
             {
                 if (target.net?.connection != null)
-                    ping = target.net.connection.GetAveragePing();
+                    ping = Network.Net.sv.GetAveragePing(target.net.connection);
             }
             catch
             {
@@ -2022,28 +2142,36 @@ namespace Oxide.Plugins
                 // God mode is enforced through the damage hook.
             }
 
-            if (state.Fly && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, true);
-            else if (!state.Fly && player.HasPlayerFlag(BasePlayer.PlayerFlags.Flying))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Flying, false);
+            if (state.Fly || state.Noclip)
+                SyncMovementMode(player, state);
 
-            if (state.Noclip && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, true);
-            else if (!state.Noclip && player.HasPlayerFlag(BasePlayer.PlayerFlags.Noclip))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Noclip, false);
+            if (state.Vanish && !IsVanishEnabled(player))
+                SyncVanishState(player, true);
+            else if (!state.Vanish && IsVanishEnabled(player))
+                SyncVanishState(player, false);
 
-            if (state.Vanish && !player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, true);
-            else if (!state.Vanish && player.HasPlayerFlag(BasePlayer.PlayerFlags.Invisible))
-                player.SetPlayerFlag(BasePlayer.PlayerFlags.Invisible, false);
-
-            if (Mathf.Abs(player.walkSpeed - state.Speed) > 0.01f || Mathf.Abs(player.runSpeed - state.Speed) > 0.01f)
-            {
-                player.walkSpeed = state.Speed;
-                player.runSpeed = state.Speed;
-            }
+            // Movement speed is intentionally not written directly because the current Rust API does not expose
+            // writable walk/run speed members on BasePlayer.
 
             return null;
+        }
+
+        private void OnPlayerSleepEnded(BasePlayer player)
+        {
+            if (!IsPluginEnabled() || player == null)
+                return;
+
+            PlayerState state = GetState(player);
+            if (state == null)
+                return;
+
+            state.MovementSynced = false;
+
+            if (state.Vanish)
+                SyncVanishState(player, true);
+
+            if (state.Fly || state.Noclip)
+                SyncMovementMode(player, state);
         }
 
         private void OnPlayerConnected(BasePlayer player)
