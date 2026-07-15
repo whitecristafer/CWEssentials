@@ -12,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.1.2")]
+    [Info("CWEssentials", "whitecristafer", "1.2.2")]
     [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.1.2";
+        private const string PluginVersion = "1.2.2";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -525,12 +525,22 @@ namespace Oxide.Plugins
             return $"{prefix} <size={size}><color={color}>{message}</color></size>";
         }
 
+        private void SendMessage(BasePlayer player, string message)
+        {
+            if (player == null || string.IsNullOrEmpty(message))
+                return;
+
+            ulong icon = _config?.Settings?.PluginIcon ?? DefaultPluginIcon;
+            string final = message;
+            player.SendConsoleCommand("chat.add", 2, icon, final);
+        }
+
         private void Reply(BasePlayer player, string message, string colorKey = "Info", bool useTitleSize = false)
         {
             if (player == null || string.IsNullOrEmpty(message))
                 return;
 
-            player.ChatMessage(FormatChatMessage(message, colorKey, useTitleSize));
+            SendMessage(player, FormatChatMessage(message, colorKey, useTitleSize));
         }
 
         private void Reply(ConsoleSystem.Arg arg, string message)
