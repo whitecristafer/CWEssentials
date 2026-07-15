@@ -15,10 +15,10 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.4.1", ResourceId = 258869)]
+    [Info("CWEssentials", "whitecristafer", "1.4.2", ResourceId = 258869)]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.4.1";
+        private const string PluginVersion = "1.4.2";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
