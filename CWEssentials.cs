@@ -12,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("CWEssentials", "whitecristafer", "1.2.3")]
+    [Info("CWEssentials", "whitecristafer", "1.2.4-VULNERABLE")]
     [Description("Essential Rust admin tools for maintenance, teleportation, player states, moderation and server information.")]
     public class CWEssentials : RustPlugin
     {
-        private const string PluginVersion = "1.2.3";
+        private const string PluginVersion = "1.2.4-VULNERABLE";
         private const string PermissionAdmin = "cwessentials.admin";
         private const string PermissionTargetOthers = "cwessentials.target.others";
         private const string PermissionBase = "cwessentials.";
@@ -385,15 +385,32 @@ namespace Oxide.Plugins
                 permission.RegisterPermission(PermissionBase + perm, this);
         }
 
+        private bool IsServerConsole(CommandContext context)
+        {
+            return context.Player == null && (context.Arg == null || context.Arg.Connection == null);
+        }
+
         private bool HasPermission(BasePlayer player, string permissionName)
         {
+            // For internal calls, null is never considered a "permission".
             if (player == null)
-                return true;
+                return false;
 
             if (player.IsAdmin)
                 return true;
 
             return permission.UserHasPermission(player.UserIDString, permissionName);
+        }
+
+        private bool HasPermission(CommandContext context, string permissionName)
+        {
+            // Real Server Console/RCON
+            if (context.Player == null)
+            {
+                return context.Arg == null || context.Arg.Connection == null;
+            }
+
+            return HasPermission(context.Player, permissionName);
         }
 
         private bool IsAdmin(BasePlayer player)
@@ -863,7 +880,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Maintenance"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "maintenance"))
+            if (!HasPermission(context, PermissionBase + "maintenance"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1031,7 +1048,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled(configName))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + permissionSuffix))
+            if (!HasPermission(context, PermissionBase + permissionSuffix))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1161,7 +1178,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Speed"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "speed"))
+            if (!HasPermission(context, PermissionBase + "speed"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1343,7 +1360,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("TPLoc"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "tploc"))
+            if (!HasPermission(context, PermissionBase + "tploc"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1573,7 +1590,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Clear"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "clear"))
+            if (!HasPermission(context, PermissionBase + "clear"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1612,7 +1629,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Give"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "give"))
+            if (!HasPermission(context, PermissionBase + "give"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1690,7 +1707,7 @@ namespace Oxide.Plugins
                 return;
 
             string permissionName = PermissionBase + (repairAll ? "repairall" : "repair");
-            if (context.Player != null && !HasPermission(context.Player, permissionName))
+            if (!HasPermission(context, permissionName))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1777,7 +1794,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Kick"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "kick"))
+            if (!HasPermission(context, PermissionBase + "kick"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1815,7 +1832,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("List"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "list"))
+            if (!HasPermission(context, PermissionBase + "list"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1855,7 +1872,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Ping"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "ping"))
+            if (!HasPermission(context, PermissionBase + "ping"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -1951,7 +1968,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled() || !IsCommandEnabled("Rules"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "rules"))
+            if (!HasPermission(context, PermissionBase + "rules"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -2042,7 +2059,7 @@ namespace Oxide.Plugins
             if (!IsPluginEnabled())
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "help"))
+            if (!HasPermission(context, PermissionBase + "help"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -2132,7 +2149,7 @@ namespace Oxide.Plugins
             if (!IsCommandEnabled("Reload"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "reload"))
+            if (!HasPermission(context, PermissionBase + "reload"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
@@ -2163,7 +2180,7 @@ namespace Oxide.Plugins
             if (!IsCommandEnabled("Version"))
                 return;
 
-            if (context.Player != null && !HasPermission(context.Player, PermissionBase + "version"))
+            if (!HasPermission(context, PermissionBase + "version"))
             {
                 Reply(context, Lang("NoPermission", context.UserId), "Error");
                 return;
