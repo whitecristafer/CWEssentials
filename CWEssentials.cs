@@ -545,6 +545,14 @@ namespace Oxide.Plugins
             return _data.PlayerStates.TryGetValue(player.userID, out PlayerState state) && state != null && state.Vanish;
         }
 
+        // Public API for other plugins (e.g. MagicTags) to check the *live* vanish state via
+        // CWEssentials?.CallHook("OnIsPlayerVanished", player). Backed by the same static set the Harmony
+        // patches use, so it's a plain HashSet lookup — cheap enough to call every render tick.
+        private object OnIsPlayerVanished(BasePlayer player)
+        {
+            return player != null && _networkHiddenIds.Contains(player.userID);
+        }
+
         // Idempotently adjusts the player's real state to the desired one (enabled).
         // You can call as many times as you want in a row with the same enabled without side effects —
         // this fixes a race in which a repeat call with the state already applied is either nothing
@@ -590,6 +598,8 @@ namespace Oxide.Plugins
                 player.SendNetworkUpdateImmediate();
                 player.GetHeldEntity()?.SendNetworkUpdate();
 
+                Interface.Oxide.CallHook("OnPlayerVanishToggled", player, true);
+
                 return;
             }
 
@@ -617,6 +627,8 @@ namespace Oxide.Plugins
 
             if (player.IsConnected)
                 player.SendNetworkUpdateImmediate();
+
+            Interface.Oxide.CallHook("OnPlayerVanishToggled", player, false);
         }
 
             // limitNetworking/isInvisible flags by themselves do not unsubscribe already connected clients —
